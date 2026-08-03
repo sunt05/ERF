@@ -312,8 +312,16 @@ def build(args) -> str:
     b.gattr("JULDAY", i4(args.julday))
     b.gattr("GMT", f4(args.gmt))
 
-    times = np.array([list(args.start_date.ljust(19)[:19].encode("ascii"))],
-                     dtype="S1").reshape(1, 19)
+    # NOTE: build the char array with frombuffer, not
+    # ``np.array(list(s.encode()), dtype="S1")`` -- ``list(bytes)`` yields *ints*
+    # and numpy then stringifies each one and truncates to one character, so
+    # "2020-07-01_12:00:00" is silently stored as "5454445444945544544" (the
+    # leading decimal digit of each ASCII code).  ERF reads this variable, not
+    # the SIMULATION_START_DATE attribute (ERF_InitFromWRFInput.cpp:95), so the
+    # corruption shows up as ``getEpochTime`` returning -1 and the whole run
+    # dating itself to 1969-12-31.
+    times = np.frombuffer(args.start_date.ljust(19)[:19].encode("ascii"),
+                          dtype="S1").reshape(1, 19)
     tv = b.nc.createVariable("Times", "S1", ("Time", "DateStrLen"))
     tv[...] = times
 

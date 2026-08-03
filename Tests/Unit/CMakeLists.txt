@@ -156,6 +156,11 @@ target_sources(${erf_exe_name}
 if(ERF_ENABLE_NOAHMP)
   target_sources(${erf_exe_name} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/LandSurfaceModel/Noah-MP/ERF_GTestNoahMPResultPolicy.cpp
+    # Motivation: the urban canopy shadow model keys off an absolute date that
+    # only ERF can supply, so the epoch <-> calendar round trip, the Julian day
+    # advanced by elapsed time, and the solar declination and hour angle that
+    # follow from it must be pinned independently of a full Noah-MP run.
+    ${CMAKE_CURRENT_SOURCE_DIR}/LandSurfaceModel/Noah-MP/ERF_GTestNoahMPCalendar.cpp
   )
 endif()
 build_erf_exe(${erf_exe_name} NO_ERF_MAIN)
