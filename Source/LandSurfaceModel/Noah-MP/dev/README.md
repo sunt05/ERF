@@ -35,6 +35,12 @@ a change must not break. Public, user-facing documentation lives at
 | [<code>spec&#8209;noahmp&#8209;io.md</code>](spec-noahmp-io.md)       | Driver-owned I/O: checkpoint/restart, the per-step land plotfile, and static-input reads (`namelist.erf`, `NoahmpTable.TBL`, the NetCDF land file).                             |
 | [<code>spec&#8209;noahmp&#8209;reorg.md</code>](spec-noahmp-reorg.md) | The driver's **source layout** and the X-macro field registry: why the code is split as it is, and how the enum/name/copy sync is collapsed.                                    |
 
+### Proposals (not yet implemented)
+
+| Plan                                                                    | What it covers                                                                                                                                                              |
+|-------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| [<code>plan&#8209;slucm&#8209;coupling.md</code>](plan-slucm-coupling.md) | Adding a WRF-style **single-layer urban canopy model** as an urban tile blended with the Noah-MP rural tile by urban fraction: upstream survey, what the submodule already provides, the architecture decision, and the phasing. |
+
 ## Conventions used across these docs
 
 - **ERF side vs Noah-MP side.** "ERF side" = ERF's gridded fields (held in AMReX
