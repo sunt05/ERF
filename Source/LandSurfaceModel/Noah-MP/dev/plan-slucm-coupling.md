@@ -138,7 +138,18 @@ urban plumbing is inherited from NCAR and never exercised (`SF_URBAN_PHYSICS = 0
 ## 4. Gaps on the ERF (C++) side
 
 The first draft claimed "nothing new is strictly required" on the output side.
-**Wrong — four outputs are required, and three of them are physics blockers.**
+**Wrong — but the gap is narrower and differently placed than the second draft
+said.** `tau_ew`, `tau_ns`, `emiss` and all four banded albedos are **already
+coupled end to end** (`ERF_NOAHMP_Fields.H:49-53,77-81`; `NoahmpIO.H-mc:41-47`;
+written by `EnergyVarOutTransferMod.F90:107-110`). ERF receives them from
+Noah-MP today. What is missing is that **SLUCM never contributes to them** — so
+every fix below is *Fortran-side blend work in Phase 2*, not ERF-side coupling
+work, and none of it touches the ABI or `m_lsm_data_size`.
+
+The single genuine coupling gap is **`QFX`**: 0 hits in `NoahmpIO.H-mc`,
+Fortran-only at `NoahmpIOVarType.F90:315`. It must be promoted in Phase 3
+(appending to `NOAHMP_OUTPUT_2D_FIELDS_TAIL` does **not** change
+`m_lsm_data_size`, so no checkpoint break).
 
 | Gap | Detail |
 |---|---|
@@ -226,25 +237,72 @@ Deliverable in `sunt05/ERF` alone, and useful with or without SLUCM:
    never compiled in CI**. Clone `gcc-rrtmgp.yml`, add `gfortran`,
    `libnetcdff-dev`, `python3`, `submodules: recursive`, `-DERF_ENABLE_NOAHMP=ON`.
    Everything else depends on this existing.
-2. **Regression baseline.** `Tests/CTestList.cmake` has no Noah-MP or WPS entry
-   and `Exec/RegTests/WPS_Test/` has no `GNUmakefile`. Without this, §8.3 has
-   nothing to compare against.
-3. **`ZNT` → MOST roughness.** Append `X(znt)` / `X(o_znt, ZNT)` / `X(ZNT_o, znt, o_znt)`
-   to the three registries in `ERF_NOAHMP_Fields.H`; add `RoughCalcType::LSM` and
-   accept `erf.most.roughness_type_land = "lsm"` (`ERF_SurfaceLayer.H:211-215`);
-   fill `z_0[lev]` as `get_lsm_tsurf` fills `t_surf`. Carries rural/bulk
-   roughness only until the Phase 2 write-back lands — say so in the docs.
-4. **`urb_frac_lev` becomes live.** Add `FRC_URB2D` and `LU_INDEX` to
-   `ERF_ReadFromWRFInput.cpp:125-129`, fill it in `ERF_InitFromWRFInput.cpp`,
-   change the default from `setVal(one)` to zero (`ERF_MakeNewArrays.cpp:503`),
-   and register it in `ERF_Plotfile2DCatalog.cpp` so ingestion is verifiable.
-5. **Parameter-check aborts** for SLUCM together with `ImmersedForcing` **or**
-   `ForestDrag`, where `buildings_type`/`lsm_type` are parsed.
-6. **Feature-coupling parity.** `Exec/Make.ERF.general:36-41` forces
-   `USE_NOAHMP ⇒ USE_RRTMGP ⇒ USE_KOKKOS/NETCDF`; CMake has no such rule, so
-   `-DERF_ENABLE_NOAHMP=ON -DERF_ENABLE_RRTMGP=OFF` is a config the make path
-   cannot express. Encode or explicitly reject it.
-7. **Unit tests** for 3 and 4, registered in the now-live `if(ERF_ENABLE_NOAHMP)` block.
+2. **Regression baseline — blocked on a data decision, not on code.**
+   `Tests/CTestList.cmake` has no Noah-MP or WPS entry. (`WPS_Test` needs **no**
+   `GNUmakefile`: ERF builds a single shared `erf_exec`, and every `add_test_r`
+   entry passes `TEST_DIR=""`.) The real blocker: `wrfinput_chisholmview_d01`,
+   `wrfbdy_...` and the four RRTMGP coefficient files are **not in the repo**;
+   gold files are 334 MB committed in-tree with **no download mechanism in any
+   GitHub workflow** (the gold-file repo is LLNL-GitLab-only). The nearest
+   precedent, `add_test_r(Radiation)`, is itself dead behind an
+   `ERF_ENABLE_RRGMTP` typo at `CTestList.cmake:523`. **Decide where test data
+   lives, and size a runner-appropriate deck, before writing this.**
+3. **`ZNT` → MOST roughness.** Append `X(znt)` / `X(o_znt, ZNT)` /
+   `X(ZNT_o, znt, o_znt)` to the three registries in `ERF_NOAHMP_Fields.H` —
+   `read_results` is fully table-driven, so **`ERF_NOAHMP_Advance.cpp` needs no
+   edit**. Add a positivity rule for `o_znt` in `ERF_NOAHMP_ResultPolicy.H`
+   (`result_is_valid` accepts `0.0`, and `ERF_MOSTStress.H:174` computes
+   `log(zref/z0)` → `inf`). Add `RoughCalcType::LSM`, accept
+   `erf.most.roughness_type_land = "lsm"` (`ERF_SurfaceLayer.H:211-215`), and
+   **widen the six `Abort("Unknown value for rough_type_land")` guards** rather
+   than writing new functors. `z_0[lev]` has no per-step land update path today
+   (filled once at init, updated only for `!is_land`) — add `get_lsm_z0()`
+   mirroring `get_lsm_tsurf` (`ERF_SurfaceLayer.cpp:1214`) plus an
+   `m_lsm_z0_indx` resolved by name. **Extract the per-cell selection into a
+   header-only free function** (as `ERF_SurfaceLayerStress.H` does) — otherwise
+   it is not unit-testable.
+   Two caveats: this **breaks existing checkpoints in Phase 1**, because
+   `NOAHMP_LSMDATA_FIELDS` *is* `m_lsm_data_size` and LSM data is checkpointed
+   positionally (`ERF_Checkpoint.cpp:238-244`, `:818-825`) with the soil profile
+   indexed off `NumVars`. And it is **largely inert where SLUCM runs**: over land
+   with valid LSM fluxes on both neighbouring cells, ERF discards MOST entirely
+   (`ERF_SurfaceLayerStress.H:62-64`) and re-derives `u* = sqrt(|τ|)`. Its value
+   is at LSM-invalid and land/sea-boundary faces, and for PBL `get_z0` consumers.
+4. **`urb_frac_lev` becomes live.** Add `FRC_URB2D` to
+   `ERF_ReadFromWRFInput.cpp:125-129` and to `NC_names`. **Critically, also add
+   it to the `has_fallback_behavior` disjunction at
+   `ERF_InitFromWRFInput.cpp:352-355`** — that list is nine dycore variables, and
+   anything else failing to read hits `amrex::Abort`, so without this **every
+   existing wrfinput (none of which carry `FRC_URB2D`) dies at init.** Fill
+   `urb_frac_lev` with a clamped copy modelled on the `TSK` block, change the
+   default from `setVal(one)` to zero (`ERF_MakeNewArrays.cpp:503`), and register
+   it in `ERF_Plotfile2DCatalog.cpp` (Geometry category — needs an explicit fill
+   block in `ERF_Plotfile2D.cpp` in **catalog order**, immediately after
+   `landmask`). **Drop `LU_INDEX`** — redundant with `IVGTYP`, no ERF container,
+   pure added abort risk.
+5. **Parameter-check aborts** for SLUCM with `ImmersedForcing` (both
+   `BuildingsType` and `TerrainType`) or `ForestDrag`. Home is
+   `ERF::ParameterSanityChecks()` (`ERF.cpp:2492`), not `SolverChoice::init_params`,
+   because `do_forest_drag` is only set later at `ERF.cpp:2442`; the existing
+   idiom is the `cf_width` check at `:2551`. Precedent: ERF already errors on
+   ForestDrag + ImmersedForcing at `ERF_MakeMomSources.cpp:155-156`.
+   **Blocked in Phase 1**: `sf_urban_physics` lives only in the Fortran namelist
+   and is not an ABI member, so ERF cannot know SLUCM is on. Either add an
+   `erf.slucm` mirror flag here, or defer this item to Phase 3 and check after
+   `NOAHMP::Init`.
+6. **Delete dead build-graph forcing.** *(The second draft had this backwards.)*
+   `Exec/GNUmakefile:48-52` includes `Make.ERF.general` **only when
+   `USE_RRTMGP=TRUE`**, so its `USE_NOAHMP ⇒ USE_RRTMGP` override at
+   `Make.ERF.general:36-38` is unreachable for the case it claims to guard —
+   `make USE_NOAHMP=TRUE` goes through `Make.ERF`, which requires only NetCDF,
+   exactly matching CMake. CMake and `Make.ERF` already agree; delete the dead
+   lines rather than mirroring them.
+7. **Unit tests** for 3 and 4, registered in the now-live `if(ERF_ENABLE_NOAHMP)`
+   block. Testable: the `ResultPolicy` `o_znt` rule (the existing X-macro loop in
+   `ERF_GTestNoahMPResultPolicy.cpp` covers the new row for free), the extracted
+   roughness-selection free function, and the plotfile catalog entry plus a
+   catalog↔fill-order regression. **Not** testable in isolation: `SurfaceLayer`
+   itself (no test in the tree constructs one) and the NetCDF read path.
 
 ### Phase 2 — Fortran: vendor SLUCM into the submodule fork
 
@@ -272,10 +330,17 @@ for every `use` (`Makefile:83-84`).
 4. Declare the nine missing arrays (§3) if `TREEOPTION`/distributed aerodynamics
    are ever enabled; otherwise scope them out and assert the options are off.
 5. Call the driver from `NoahmpDriverMainMod.F90` under
-   `if (SF_URBAN_PHYSICS == 1)`; call `urban_param_init`/`urban_var_init` from
-   `NoahmpInitMainMod.F90` behind a **once-per-process latch** — `InitMain()`
-   runs per box (`ERF_NOAHMP_Init.cpp:196`) while those routines populate
-   module-level `SAVE`d tables and `OPEN` `URBPARM.TBL`.
+   `if (SF_URBAN_PHYSICS == 1)`. Call both initialisers from
+   `NoahmpInitMainMod.F90`, but **latch only `urban_param_init`** — it `OPEN`s
+   `URBPARM.TBL` and fills module-level `SAVE`d `*_TBL` arrays, so once per
+   process is right, and `InitMain()` runs per box (`ERF_NOAHMP_Init.cpp:195`).
+   `urban_var_init` is a **per-tile** initialiser (`DO I=ims,ime / DO J=jms,jme`
+   writing `UTYPE_URB2D`, the `FRC_URB2D` fallback, `TR/TB/TG/TC`,
+   `TRL/TBL/TGL_URB3D`, `module_sf_urban.F:3711-3900`) — latching it would leave
+   every box after the first with uninitialised urban state.
+9. **Urban restart I/O.** `NoahmpWriteRestartMod.F90` / `NoahmpReadRestartMod.F90`
+   are hand-enumerated varid lists with **zero** urban entries. Adding the §8.10
+   state set is a named Phase-2 deliverable, and it is not small.
 6. Guard `SF_URBAN_PHYSICS == 1 .and. NSOIL /= 4` — `urban_param_init` forces
    `num_roof/wall/road_layers = num_soil_layers` and `urban_var_init` hard-codes
    `TRL_URB3D(I,1..4,J)`.
@@ -310,6 +375,12 @@ Per `spec-add-coupled-variable.md`, with four corrections the first draft missed
   C++-owned pointers on promotion, so every existing Fortran write becomes a
   write through that pointer and must be sequenced against `ScalarInitDefault()`.
 
+**Promote `QFX`** (§4): append to the `@NoahmpMacro:Source` block and add
+`X(o_qfx, QFX)` to `NOAHMP_OUTPUT_2D_FIELDS_TAIL`. This is the only genuinely
+missing coupled output; it does not change `m_lsm_data_size`, so no checkpoint
+break. If Phase 1 item 5 was deferred, promote `sf_urban_physics` as an int
+scalar here too, and move the cross-option abort to after `NOAHMP::Init`.
+
 Settle the static-field design **once**: static urban fields stay Fortran-side
 via `ReadLandMain`; only `FRC_URB2D` crosses, once, out, at init. `XLONG` need
 not cross — `NoahmpReadLandMod.F90:187` already reads it. `NOAHMP_INPUT_2D_FIELDS`
@@ -318,9 +389,12 @@ morphology would be re-copied every timestep.
 
 ### Phase 4 — ERF driver
 
-- `ERF_NOAHMP_Fields.H`: append rows for the §4 outputs. **Adding
-  `NOAHMP_LSMDATA_FIELDS` rows changes `m_lsm_data_size` and invalidates existing
-  checkpoints** — call this out in the release notes.
+- `ERF_NOAHMP_Fields.H`: only `QFX` needs a new row — `tau_ew`, `tau_ns`,
+  `emiss` and the banded albedos are already registered (§4). **The
+  checkpoint-invalidating change is `X(znt)` in Phase 1**, not here, because
+  `NOAHMP_LSMDATA_FIELDS` is what sizes `m_lsm_data_size`; `QFX` goes only into
+  the output table. Add a stored `m_lsm_data_size` to the checkpoint header with
+  a mismatch abort, or document the break.
 - `ERF_NOAHMP_Advance.cpp`: stage `DECLIN`, `OMG`, `JULIAN`, `YR`, `GMT`, and the
   true `ZLVL`; take `q_flux = QFX/ρ`.
 - `ERF_NOAHMP_Init.cpp`: copy `FRC_URB2D` into `urb_frac_lev`; require a per-level
@@ -348,9 +422,14 @@ See §8.
    | 2 high-density residential | 7.5 | 5.72 | 0.333 | 8.05 m | 9.5 m |
    | 3 commercial | 10.0 | 7.62 | 0.531 | 10.16 m | 12.0 m |
 
-   So `ZLVL = 10.0` **aborts the run** at the first commercial cell and silently
-   degrades type 2 to `ZC = ZA/2; UC = UA/2`. With the true 46.9 m everything
-   passes. Fix: stage `ZLVL` from `z(klo)`; require `ZA ≥ max(ZDC + Z0C + 2, ZR + 2)`
+   **At the configuration Phase 1 ships, none of these fire.** With
+   `use_wudapt_lcz = 0`, `urban_var_init` assigns `UTYPE_URB2D = 2` to *every*
+   `IVGTYP == ISURBAN` cell (`module_sf_urban.F:3745-3749`); types 1 and 3 are
+   reachable only through LCZ vegtypes, which §4 defers. So `ZLVL = 10.0` clears
+   type 2's 8.05 m abort *and* its 9.5 m fallback. **The abort and the fallback
+   go live only with LCZ/NUDAPT morphology or an `MH_URB` override.** Justify
+   staging `ZLVL` on reference-height consistency, not on a phantom crash.
+   Fix: stage `ZLVL` from `z(klo)`; require `ZA ≥ max(ZDC + Z0C + 2, ZR + 2)`
    and warn unless `ZA ≥ 2·ZR` (MOST is valid only above the roughness sublayer,
    2-5 building heights). **Supported envelope: `dx ≳ 1 km` and `z₁ ≥ 2·max(ZR)`;
    abort outside it.** At grey-zone `dx` users refine `Δz` to O(10-20 m), putting
@@ -421,13 +500,21 @@ gitignored. Either drop it or make the Makefile skip the parse-time run when
    does not abort.
 2. **Null test.** With `SF_URBAN_PHYSICS = 0`, `WPS_Test` reproduces its
    trajectory **bitwise**. Requires the Phase-1 baseline to exist first.
-3. **Per-column energy-balance closure** (cheapest, highest value). In a debug
-   build, for every urban column every step, assert
-   `|RN_URB − SH_URB − LH_URB − G_URB| < 1e-6·max(1,|RN_URB|)`. All four are
-   already outputs of `urban()`. Catches unit, sign and option-branch errors
-   immediately.
-4. **Grid-cell closure across the blend.** Assert
-   `SWDOWN·(1−α_blend) + ε_blend·GLW − LW_up_blend = HFX + LH + GRDFLX`.
+3. **Per-column energy-balance closure** (cheapest, highest value). `urban()`
+   defines `G = −FLXG·697.7·60` (`module_sf_urban.F:2386`) and
+   `RN = (SNET+LNET)·697.7·60` (`:2387`), while the per-facet residual is
+   `SR + RR − HR − ELER − G0R = 0`. The closing identity is therefore
+   **`RN = SH + LH − G`**, i.e. assert
+   `|RN_URB − SH_URB − LH_URB + G_URB| < 1e-6·max(1,|RN_URB|)`.
+   *(The second draft wrote `− G_URB`, which is off by `2G` — O(100 W m⁻²)
+   mid-afternoon — and would fail on a **correct** port.)*
+   Gate the assert on `AHOPTION == 0 .and. ALHOPTION == 0`: anthropogenic heat
+   enters `FLXTH`/`FLXHUM` but not `RN`, so with §7.7's advertised `AHOPTION`
+   knob the identity becomes `RN = SH + LH − G − AH − ALH`.
+4. **Grid-cell closure across the blend.** `LW_URB = LLG − LNET·697.7·60` is the
+   **total** upward longwave (emission *plus* reflection), so the net is
+   `GLW − LW_up`, not `ε·GLW − LW_up`. Assert
+   `SWDOWN·(1−α_blend) + GLW − LW_up_blend = HFX + LH + GRDFLX`.
    **This fails against the first draft's design** — it is precisely what exposes
    the missing banded albedo and emissivity, and why §4's radiation fix is
    mandatory rather than optional.
@@ -442,9 +529,13 @@ gitignored. Either drop it or make the Makefile skip the parse-time run when
    Fortran, and it is the real regression guard on the vendoring and the kind
    handling. Keep a 3-D WRF comparison as a sanity check, **not** as the
    acceptance gate — dycore differences swamp it.
-7. **`frc` sweep.** `frc ∈ {0, 0.25, 0.5, 0.75, 1}` on a single column; assert
-   every blended quantity is exactly linear in `frc` and that `frc = 1`
-   reproduces the pure-urban run. *(The first draft's "set `FRC_URB2D ≡ 0`" test
+7. **Momentum coupling** — nothing else in this list tests §4's first blocker.
+   Assert `τ_blend = frc·ρ·UST_URB² + (1−frc)·τ_rural`, and that at `frc = 1`
+   the `u*` ERF recovers via `sqrt(|τ|)` equals `UST_URB`.
+8. **`frc` sweep.** `frc ∈ {0, 0.25, 0.5, 0.75, 1}` on a single column; assert
+   every *blended* quantity is linear in `frc` and that `frc = 1` reproduces the
+   pure-urban run. Note `u*` is **not** linear in `frc` by construction
+   (`u* = sqrt(|τ|)`, `ERF_SurfaceLayer.cpp:1063`) — assert linearity of `τ`. *(The first draft's "set `FRC_URB2D ≡ 0`" test
    is not executable: `urban_var_init` detects `FRC_URB2D ≤ 0` on an urban
    `IVGTYP` and overwrites it with `FRC_URB_TBL(UTYPE)` = 0.5/0.9/0.95. To test
    the null path, set every urban `IVGTYP` to `NATURAL_TABLE` instead.)*
