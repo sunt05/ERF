@@ -7,332 +7,460 @@
 > (per-step staging), `Submodules/Noah-MP/drivers/erf/dev/spec-add-coupled-variable.md`
 > (how a variable crosses the C++ ↔ Fortran boundary).
 > Public docs: <https://erf.readthedocs.io/en/latest/CouplingToNoahMP.html>
+>
+> **Revision note.** This document was reviewed by three independent passes
+> (fact-check, urban-physics, implementation-feasibility) and substantially
+> rewritten. The single largest correction: the first draft asserted that SLUCM
+> "blends in place into fields ERF already couples, so nothing new is required on
+> the output side." **That is false in four ways** — see §1 and §4. Line and
+> symbol references below were verified against ERF at this commit and the
+> Noah-MP submodule at its pinned commit `e0aed20`.
 
-## 1. Context — what we have and what is missing
+## 1. Context — what we have, and what the tile blend actually is
 
-ERF's real-data land surface today is Noah-MP, selected with
-`erf.land_surface_model = "NOAHMP"` (`Source/ERF.cpp:2469`) and driven by
-`Source/LandSurfaceModel/Noah-MP/`. Over an urban grid cell it runs in **bulk-urban**
-mode: `ConfigVarInTransferMod.F90:155-165` sets `VegType = ISURBAN_TABLE` and
-`FlagUrban = .true.`, which only swaps in an urban roughness length
-(`src/GroundRoughnessPropertyMod.F90:70-72`) and urban soil/thermal parameters.
-There is no canyon geometry, no separate roof/wall/road energy balance, no urban
-thermal storage, and no anthropogenic heat.
+ERF's real-data land surface is Noah-MP (`erf.land_surface_model = "NOAHMP"`,
+selected at `Source/ERF.cpp:2469`, parsed at `Source/DataStructs/ERF_DataStruct.H:263`).
+Over an urban cell it runs **bulk-urban**: `ConfigVarInTransferMod.F90:155-165`
+sets `VegType = ISURBAN_TABLE` and `FlagUrban = .true.`, which swaps in an urban
+roughness *and displacement height* (`src/GroundRoughnessPropertyMod.F90:70-76`)
+and urban soil/thermal parameters. There is no canyon geometry, no separate
+roof/wall/road energy balance, no urban thermal storage, no anthropogenic heat.
 
-We want the WRF single-layer urban canopy model (Kusaka et al. 2001; Kusaka and
-Kimura 2004; Chen et al. 2011 — WRF `sf_urban_physics = 1`) run as a **tile**
-over the urban fraction of each cell, blended with the Noah-MP rural tile by
-`FRC_URB2D`. That is the "mosaic" formulation:
+We want SLUCM (Kusaka et al. 2001; Kusaka and Kimura 2004; Chen et al. 2011 —
+WRF `sf_urban_physics = 1`) run as a **tile** over the urban fraction, blended
+with the Noah-MP rural tile by `FRC_URB2D`.
 
-```
-HFX = FRC_URB2D · SH_URB + (1 − FRC_URB2D) · HFX_rural            [W m-2]
-QFX = FRC_URB2D · LH_KINEMATIC_URB + (1 − FRC_URB2D) · QFX_rural  [kg m-2 s-1]
-TSK / ALBEDO / EMISS / GRDFLX / QSFC / UST  blended the same way
-```
+### What the SLUCM branch actually blends
 
-Noah-MP supplies the rural side of that blend by being run with the *natural*
-vegetation type over the whole cell, not the urban one.
+Verbatim from the `IF (SF_URBAN_PHYSICS == 1)` branch of
+`drivers/wrf/NoahmpUrbanDriverMainMod.F90` (lines 411-653) — **exactly nine
+assignments**, at lines 565-581:
+
+| Target | Form |
+|---|---|
+| `TS_URB2D` | `= TS_URB` (stored, not blended) |
+| `ALBEDO` | `frc·ALB_URB + (1−frc)·ALBEDO` |
+| `HFX` | `frc·SH_URB + (1−frc)·HFX` |
+| `QFX` | `frc·LH_KINEMATIC_URB + (1−frc)·QFX` |
+| `LH` | `frc·LH_URB + (1−frc)·LH` |
+| `GRDFLX` | `frc·(G_URB·(−1.0)) + (1−frc)·GRDFLX` — **note the sign flip** |
+| `TSK` | `frc·TS_URB + (1−frc)·TSK` |
+| `QSFC` | `frc·QS_URB + (1−frc)·QSFC` |
+| `UST` | `frc·UST_URB + (1−frc)·UST` |
+
+**What is *not* blended, contrary to the first draft:**
+
+- **`EMISS`** — never assigned in the SLUCM branch. The only `emiss(i,j) =` in the
+  file is at line 796, inside the `SF_URBAN_PHYSICS == 2/3` block.
+- **`TAU_EW` / `TAU_NS`** — the strings do not appear anywhere in the file (0 hits).
+- **`ZNT`** — read in at line 447 (`ZNT_URB = ZNT(I,J)`) and passed as an input.
+  `urban()` does set `ZNT = Z0` internally (`module_sf_urban.F:2400`), but the
+  driver **never writes it back**.
+
+The `*_RURAL` snapshot at lines 400-409 and the combined-radiation epilogue at
+lines 744-831 (which recomputes `TSK` from `RL_UP_TOT` and `ALBEDO` from
+`RS_ABS_TOT`) belong **exclusively to the BEP/BEM branch**. They are dead code
+for SLUCM, which blends in place against the live `HFX(I,J)`. Do not copy them
+as-is — but see §4, because ERF needs that epilogue's *physics* for a different
+reason than WRF does.
 
 ## 2. Upstream survey — are we first?
 
-Yes, for a mesoscale urban **parameterization**. Findings from `erf-model/ERF`
-issues and pull requests (searched `urban`, `SLUCM`, `UCM`, `LCZ`, `canopy`,
-`building`, `land surface`):
+Yes, for a mesoscale urban **parameterization**. From `erf-model/ERF` issues and
+PRs (searched `urban`, `SLUCM`, `UCM`, `LCZ`, `canopy`, `building`, `land surface`):
 
-- **No urban canopy parameterization exists and none is proposed.** No open or
-  closed issue/PR mentions SLUCM, BEP, BEP+BEM, TEB, LCZ, or `FRC_URB2D`.
-- **ERF's urban story upstream is building-resolving, not parameterized.**
-  Immersed forcing (`erf.buildings_type = "ImmersedForcing"`) plus embedded
-  boundaries is actively developed: #2763 (IF terrain and buildings pathways),
-  #2953 (immersed-boundary temperature forcing), #3464/#3468 (zero surface
-  fluxes inside immersed cells), #3478 (wall model for buildings), #3482
-  (implicit IF formulation, open draft). `Docs/sphinx_doc/ERFvsWRF.rst:69` is the
-  only place the word "urban" appears in the docs, and it points at exactly this:
-  *"Terrain and urban geometries may be simulated with immersed forcing or
-  embedded (immersed) boundary techniques."*
-- **The nearest precedent for a canopy parameterization is the forest drag model**
-  (#1980, ported from AMR-Wind): `Source/SourceTerms/ERF_ForestDrag.{H,cpp}`
-  builds an `a·Cd` field applied as a momentum sink in
-  `ERF_MakeMomSources.cpp:747-783`. It has no energy budget — it is drag only.
-- **All 2026 LSM effort upstream is Noah-MP hardening**, not new schemes: full
-  two-way coupling (#3414/#3412), checkpoint/restart (#3255, #3317), sea-ice
-  guard (#3286), coarse→fine flux interpolation (#3334), stress unit fix (#3428),
-  expanded 2-D land diagnostics (#3465).
+- **No urban canopy parameterization exists and none is proposed.** No issue or
+  PR mentions SLUCM, BEP, BEP+BEM, TEB, LCZ, or `FRC_URB2D`.
+- **ERF's urban story upstream is building-resolving.** Immersed forcing plus
+  embedded boundaries is actively developed: #2763, #2953, #3464/#3468, #3478,
+  #3482 (open). `Docs/sphinx_doc/ERFvsWRF.rst:69` is the only `.rst` mention of
+  "urban": *"Terrain and urban geometries may be simulated with immersed forcing
+  or embedded (immersed) boundary techniques."*
+- **Nearest precedent for a canopy parameterization**: the forest drag model
+  (#1980, from AMR-Wind), `Source/SourceTerms/ERF_ForestDrag.{H,cpp}` applied at
+  `ERF_MakeMomSources.cpp:747-783` — momentum sink only, no energy budget.
+- **All 2026 LSM effort upstream is Noah-MP hardening**: #3414/#3412 (full
+  coupling), #3255/#3317 (restart), #3286 (sea ice), #3334 (coarse→fine flux),
+  #3428 (stress units), #3465 (2-D diagnostics).
 
-Two consequences for this plan:
+Consequences: no branch to coordinate with, no reviewer with context — and ERF
+already owns the *microscale* urban problem. SLUCM is the mesoscale complement,
+and §7.1 must forbid running both over the same cells.
 
-1. There is no competing branch to coordinate with — but also no reviewer with
-   context, so the design has to be self-justifying and testable against WRF.
-2. ERF already "owns" the microscale urban problem. **SLUCM is the mesoscale and
-   grey-zone complement, not a replacement**, and the plan must forbid running
-   both over the same cells (§7).
-
-On the WRF side, note that the tile blending no longer lives in WRF itself: WRF
-master has moved Noah-MP into the `NCAR/noahmp` submodule, and the urban tile
-driver now lives *inside that submodule* as
-`drivers/wrf/NoahmpUrbanDriverMainMod.F90`. Only the SLUCM physics
-(`phys/module_sf_urban.F`) and `run/URBPARM.TBL` remain in WRF proper. That
-matters, because our Noah-MP submodule is a fork of the same repository.
+On the WRF side the tile driver now lives inside `NCAR/noahmp` as
+`drivers/wrf/NoahmpUrbanDriverMainMod.F90`; only `phys/module_sf_urban.F` and
+`run/URBPARM.TBL` remain in WRF proper.
 
 ## 3. What already exists in our tree
 
-`Submodules/Noah-MP` is pinned to `erf-model/noahmp` @ `e0aed20`, a fork of
-`NCAR/noahmp`. **Most of the Fortran-side urban plumbing is already there**,
-inherited from the NCAR driver and never exercised because ERF passes
-`SF_URBAN_PHYSICS = 0`:
+`Submodules/Noah-MP` pins `erf-model/noahmp` @ `e0aed20`. Much of the Fortran
+urban plumbing is inherited from NCAR and never exercised (`SF_URBAN_PHYSICS = 0`):
 
-| Already present in `drivers/erf/` | What it gives us |
+| Present in `drivers/erf/` | What it gives us |
 |---|---|
-| `NoahmpIOVarType.F90-mc` (133 urban references) | The complete SLUCM array set — `tr/tb/tg/tc/qc/uc_urb2d`, `xxx{r,b,g,c}_urb2d`, `trl/tbl/tgl_urb3d`, `sh/lh/g/rn/ts_urb2d`, `psim/psih/u10/v10/GZ1OZ0/AKMS/th2/q2/ust_urb2d`, `cmcr/tgr/tgrl/smr/drel*/flxhum*`, `frc_urb2d`, `utype_urb2d`, `mh/stdh/lp/lb/hgt/lf_urb2d` — plus the BEP/BEM and green-roof/PV sets, `sf_urban_physics`, `num_urban_*`, the derived `urban_map_*`, `ISURBAN`, `URBTYPE_beg`, `LCZ_1..11_TABLE`, `IRI_URBAN`, `GMT`, `JULDAY`, `HRANG`, `DECLIN` |
-| `NoahmpIOVarInitMod.F90-mc` (187 urban references) | Allocation of all of the above, already gated on `SF_URBAN_PHYSICS == 1` vs `2/3` |
-| `NoahmpReadNamelistMod.F90` | Reads `sf_urban_physics`, `use_wudapt_lcz`, `num_urban_hi`, `urban_atmosphere_thickness`; derives `urban_map_*` |
-| `NoahmpReadTableMod.F90` + `NoahmpTable.TBL` | `ISURBAN_TABLE`, `NATURAL_TABLE`, `LCZ_1..11_TABLE` (`URBTYPE_beg = 50`, LCZ 51–61) |
-| **`ConfigVarInTransferMod.F90:155-165`** | **The mosaic contract is already implemented.** For an urban cell with `SF_URBAN_PHYSICS > 0` it sets `VegType = NATURAL_TABLE` and `GVFMAX = 96 %` — i.e. Noah-MP runs the *rural tile*, and the comment says outright that "urban is handled by explicit urban scheme outside Noah-MP". `SF_URBAN_PHYSICS == 0` is today's bulk-urban path. |
-| `NoahmpInitMainMod.F90:175-207`, `NoahmpDriverMainMod.F90:200-215` | Urban-point branching for LAI/biomass initialization and urban irrigation |
-| `NoahmpReadLandMod.F90` | Reads the wrfinput NetCDF directly (`XLAT`, `XLONG`, `IVGTYP`, `VEGFRA`, `SHDMIN/MAX`, …) and the global attribute `ISURBAN` — the natural place to add urban static fields |
-| `Exec/RegTests/WPS_Test/namelist.erf:56-57` | Already carries `SF_URBAN_PHYSICS = 0` and `USE_WUDAPT_LCZ = 0` |
+| `NoahmpIOVarType.F90-mc` (133 urban refs) | Most of the SLUCM array set — `tr/tb/tg/tc/qc/uc_urb2d`, `xxx{r,b,g,c}_urb2d`, `trl/tbl/tgl_urb3d`, `sh/lh/g/rn/ts_urb2d`, `psim/psih/u10/v10/GZ1OZ0/AKMS/th2/q2/ust_urb2d`, `cmcr/tgr/tgrl/smr/drel*/flxhum*`, `frc_urb2d`, `utype_urb2d`, `lp/lb/hgt/mh/stdh/lf_urb2d` — plus BEP/BEM and green-roof/PV sets, `sf_urban_physics`, `num_urban_*`, `urban_map_*`, `ISURBAN`, `URBTYPE_beg`, `LCZ_1..11_TABLE`, `IRI_URBAN`, `GMT`, `JULDAY`, `HRANG`, `DECLIN` |
+| `NoahmpIOVarInitMod.F90-mc` (187 urban refs) | Allocation, gated on `SF_URBAN_PHYSICS == 1` vs `2/3`, plus a **second** guarded block holding the `undefined_real_neg` sentinel initialisation |
+| `NoahmpReadNamelistMod.F90` | Reads `sf_urban_physics`, `use_wudapt_lcz`, `num_urban_hi`, `urban_atmosphere_thickness`, and validates the BEP/BEM level count |
+| `NoahmpReadTableMod.F90` + `NoahmpTable.TBL` | `ISURBAN_TABLE`, `NATURAL_TABLE`, `LCZ_1..11_TABLE` (`URBTYPE_beg = 50`, LCZ 51-61) |
+| **`ConfigVarInTransferMod.F90:155-165`** | **The rural-tile contract, already implemented.** `SF_URBAN_PHYSICS > 0` ⇒ `VegType = NATURAL_TABLE`, `GVFMAX = 96 %`, with the comment "urban is handled by explicit urban scheme outside Noah-MP" |
+| `NoahmpInitMainMod.F90:175-207`, `NoahmpDriverMainMod.F90:178-194` | Urban-point LAI/biomass branching; urban irrigation |
+| `NoahmpReadLandMod.F90` | Reads wrfinput directly (`XLAT`, `XLONG`, `IVGTYP`, `ISLTYP`, `VEGFRA`, `SHDMIN/MAX`) and the `ISURBAN` global attribute |
+| `NoahmpIO.H-mc:169-170` | `Z0` and `ZNT` are **already coupled members**; Noah-MP fills `ZNT` (`EnergyVarOutTransferMod.F90:123`) |
 
-**Exactly three Fortran pieces are missing:**
+**Corrections to the first draft's inventory:**
 
-1. **`module_sf_urban.F`** — the SLUCM physics. Not in the noahmp repo; it is WRF
-   `phys/module_sf_urban.F` (5620 lines). Its only external dependencies are
-   `wrf_error_fatal`/`wrf_message` (via a preprocessor shim it already defines at
-   the top of the file) and `piconst` from `module_model_constants` — both
-   trivially satisfied. It also brings `urban_param_init` (reads `URBPARM.TBL`)
-   and `urban_var_init` (cold-start of the urban state), which WRF calls from
-   `module_physics_init.F` and which we must call from `NoahmpInitMain`.
-2. **`NoahmpUrbanDriverMainMod.F90`** — present in the fork at `drivers/wrf/`
-   (839 lines), absent from `drivers/erf/`. Its `sf_urban_physics == 1` branch
-   (lines 411–655) *is* the mosaic blender, line-for-line reusable.
-3. **`URBPARM.TBL`** — shipped next to `NoahmpTable.TBL` in the run directory.
+- The array set is **not complete**. Nine arrays that the WRF driver passes into
+  `urban()` are absent from `NoahmpIOVarType.F90-mc`: `lf_urb2d_s` and the
+  in-canyon vegetation set `tvg_urb2d`, `tt_urb2d`, `xxxvg_urb2d`, `tvgl_urb3d`,
+  `smg_urb3d`, `cmcg_urb2d`, `flxhumvg_urb2d`, `flxhumt_urb2d`. In WRF these come
+  from the registry-generated grid struct.
+- `urban_map_*` is **declared and consumed as allocation extents but never
+  assigned** at this commit (`grep "urban_map_[a-z]* *="` → zero hits). The
+  namelist reader does *not* derive them.
+
+### The four Fortran pieces that are missing
+
+1. **`module_sf_urban.F90`** — the SLUCM physics, from WRF `phys/` (5620 lines).
+   Must be renamed to `.F90`: both build systems glob `*.F90` only
+   (`drivers/erf/CMakeLists.txt:39-44`, `Makefile:48`), and gfortran treats `.F`
+   as **fixed-form** while the file is free-form. Its `use` list is
+   `module_wrf_error` (line 7) and `module_model_constants, only: piconst`
+   (line 11) — the file's `FATAL_ERROR`/`WRITE_MESSAGE` macros do *not* remove
+   these. Brings `urban_param_init` (reads `URBPARM.TBL`) and `urban_var_init`.
+2. **`NoahmpUrbanDriverMainMod.F90`** — from `drivers/wrf/`, reduced to the SLUCM
+   branch. Its own `use` list needs `KARMAN/CP/XLV` rehoused and `cal_mon_day`
+   resolved (§7.3). ~180 explicit dummy args — this is real plumbing, not a copy.
+3. **`NoahmpUrbanShimMod.F90`** — supplying `wrf_message`, `wrf_error_fatal`,
+   `piconst`, `KARMAN`, `CP`, `XLV`.
+4. **`URBPARM.TBL`** (and `URBPARM_LCZ.TBL` if LCZ is enabled — a *separate*
+   11-category file opened when `use_wudapt_lcz = 1`, `module_sf_urban.F:3018-3021`).
 
 ## 4. Gaps on the ERF (C++) side
 
+The first draft claimed "nothing new is strictly required" on the output side.
+**Wrong — four outputs are required, and three of them are physics blockers.**
+
 | Gap | Detail |
 |---|---|
-| **Coupled variables** | The urban *state* arrays never need to reach C++ — they are internal Noah-MP state. What must cross: **in** — `FRC_URB2D`, `UTYPE_URB2D`, the NUDAPT morphology (`LP/LB/HGT/MH/STDH/LF_URB2D`), `XLONG`, and the time scalars `JULIAN`, `YR`, `GMT`, `DECLIN`; **out** — nothing new is strictly required, because SLUCM blends in place into `HFX`, `LH`, `TAU_EW/NS`, `TSK`, `EMISS`, `GRDFLX`, `ALBEDO`, all already coupled. Optional diagnostics: `TS_URB2D`, `SH/LH/G/RN_URB2D`, `TR/TB/TG/TC_URB2D`, `UST_URB2D`. Each is one line in the `@NoahmpMacro:Source m_noahmpio { … }` block of `NoahmpIO.H-mc`. |
-| **Static urban input** | `FRC_URB2D`, `URB_PARAM`, `LU_INDEX`, and LCZ are read **nowhere** in ERF (`ERF_ReadFromWRFInput.cpp:125-129` reads `IVGTYP`/`ISLTYP` only; metgrid reads no land-use at all). |
-| **`urb_frac_lev`** | Already declared (`Source/ERF.H:1033`), allocated and `setVal(1)` (`Source/ERF_MakeNewArrays.cpp:501-504`), resized (`ERF_Constructors.cpp:300`) — and **never filled or read anywhere**. It is a ready-made slot for `FRC_URB2D`. |
-| **Solar geometry** | SLUCM needs `DECLIN_URB`, `COSZ_URB2D`, `OMG_URB2D` (hour angle) and `XLAT_URB2D`. ERF already couples `cos_zenith_angle` (`LsmData_NOAHMP`) and has `orbital_decl` / `orbital_cos_zenith` in `Source/PhysicsInterfaces/Radiation/ERF_OrbCosZenith.H` — declination and hour angle come straight out of that machinery. |
-| **Roughness / displacement height** | The real structural gap — but smaller than it looks. `Z0` and `ZNT` are **already coupled members** of the `@NoahmpMacro:Source` block (`NoahmpIO.H-mc:169-170`), and Noah-MP already fills `ZNT`; SLUCM blends into it in place. What is missing is entirely on ERF's side: `ERF_NOAHMP_Fields.H` never reads `ZNT` into an `LsmData` field, `SurfaceLayer` takes `z0` only from `erf.most.z0` or `erf.most.roughness_file_name`, and `rough_type_land` is **hard-`Abort`ed** unless `"constant"` (`ERF_SurfaceLayer.H:205-215`). Separately, there is **no displacement height `d0` anywhere in ERF** — the log law is always `log(zref/z0)` (`ERF_MOSTStress.H:174`). |
-| **Advance dispatch** | `Source/TimeIntegration/ERF_AdvanceLSM.cpp:13` hard-codes `LandSurfaceType::NOAHMP` for the `Advance_With_State` path. Fine if SLUCM lives inside the Noah-MP model; a separate `LandSurfaceType` would have to be added here. |
-
-> **The roughness gap is not a Phase-1 blocker.** SLUCM's effect reaches the
-> atmosphere entirely through `t_flux`, `q_flux`, `tau13`, `tau23`, and
-> `SurfaceLayer::compute_sfc_params_from_lsm_fluxes` (`ERF_SurfaceLayer.cpp:1016-1082`)
-> back-derives `u*`, `θ*`, `q*`, and `L` from those. So momentum and heat coupling
-> are already correct without touching `z0`. `z0` matters only for the PBL schemes'
-> `get_z0` and for the MOST fallback in cells the LSM did not process.
+| **Momentum never reaches ERF** | WRF conveys urban drag through `UST` because its surface-layer scheme reconstructs stress from `u*`. **ERF does not**: `SurfaceLayer` reads `tau13`/`tau23` from the LSM directly (`ERF_SurfaceLayer.cpp:658-735`) and back-derives `u* = sqrt(|τ|)` (`:1063`); `UST` is not a coupled field. Ported literally, the atmosphere sees **rural stress at full weight** with an **urban-weighted heat flux**. Over a `frc = 0.9` city (`Z0C ≈ 0.5 m` vs rural `z0m ≈ 0.06-0.1 m`) τ is under-predicted ~1.8×, and `t* = −t_flux/u*` then pairs an urban `t_flux` with a rural `u*` — over-estimating `t*` ~2-3× and handing the PBL a spurious super-unstable surface layer over every city at midday. **Must add a `TAU_EW/NS` blend** from `UST_URB² = (R·CDR + RW·CDC)·UA²` (kinematic — multiply by `RHOO`), projected on `U1_URB/UA_URB`, `V1_URB/UA_URB`. |
+| **Urban albedo never reaches radiation** | RRTMGP consumes four *banded* albedos (`sfc_alb_dir_vis/nir`, `sfc_alb_dif_vis/nir`, `ERF_Radiation.cpp:620-622`), filled from `ALBSFCDIRXY`/`ALBSFCDIFXY`. SLUCM's `ALB_URB` is blended only into the scalar `ALBEDO`, which in ERF is the **diagnostic** `o_albedo`. As written, an urban cell reflects shortwave with the *rural* albedo — the primary UHI forcing is silently dropped. **Must blend all four bands** (SLUCM is broadband; apply `ALB_URB` to all four and document), and hold `alb_rural` when `swdown ≤ 0` since `urban()` zeroes `ALB` at night (`module_sf_urban.F:2384`). |
+| **Emissivity and the meaning of `TSK`** | `EMISS` is not blended at all, and `TS_URB` is **not a radiative temperature** — it is `TA + FLXTH/CHS` (`module_sf_urban.F:2446`), a bulk-flux inversion; the radiative form is commented out one line later. ERF's rural `TSK` *is* radiative (`TemperatureRadSfc`). So `TSK_blend` mixes two different quantities and is handed to RRTMGP with a rural `sfc_emis`, while SLUCM's true upward longwave `LW_URB` (including canyon trapping) is discarded. The T⁴ linearisation error is small (~0.2-0.4 K); the emissivity/flux-temperature mismatch is tens of W m⁻². **Must port the BEP epilogue's radiation algebra to the SLUCM branch** — `rl_up_urb = −LW_URB`, blend `rl_up` and `emiss`, invert for a genuine radiative `TSK`; keep `TS_URB2D` as the WRF-comparable diagnostic. |
+| **Latent-heat constant mismatch** | SLUCM uses `ELL = 2.442e6`; ERF recovers `q_flux = LH/(ρ·L_v)` with `L_v = 2.5e6` (`ERF_Constants.H:59`) — the urban moisture flux arrives **2.3 % low** (Noah-MP's rural tile is 0.4 % high in the other direction). **Couple `QFX` directly** and take `q_flux = QFX/ρ`; the SLUCM branch already blends `QFX`. Fixes both tiles. |
+| **Roughness** | `ZNT` already crosses the ABI and Noah-MP fills it — so wiring `ZNT` → a new `LsmData` row → `RoughCalcType::LSM` is genuinely ERF-only and unblocked. **But that carries the *rural/bulk* roughness only**, because the SLUCM branch never writes `ZNT` back. Adding the urban blend requires a submodule change, and a *linear* blend of `z0` is wrong — the flux-consistent form averages `1/ln²(z/z0)` at blending height. Meanwhile `rough_type_land` hard-`Abort`s unless `"constant"` (`ERF_SurfaceLayer.H:211-215`), and ERF has **no displacement height** (`ERF_MOSTStress.H:174` is `log(zref/z0)`) while `ZDC ≈ 0.76·ZR` is 4-8 m for the default table. |
+| **Static urban input** | `FRC_URB2D`, `URB_PARAM`, `LU_INDEX`, LCZ read nowhere in ERF. **But this is optional**: `urban_var_init` derives `UTYPE_URB2D` from `IVGTYP` and falls back to `FRC_URB_TBL(UTYPE)` when `FRC_URB2D` is absent, and to table geometry when `HGT_URB2D ≤ 0`. Phase 1 can run without new static data. |
+| **`urb_frac_lev`** | Declared (`ERF.H:1033`), allocated `setVal(one)` (`ERF_MakeNewArrays.cpp:501-504`) — **never filled, never read** (repo-wide grep returns only those 6 lines). Note the default is **1.0 = fully urban**, the wrong default the moment anything reads it. |
+| **Solar geometry** | `orbital_decl` supplies declination (`ERF_OrbCosZenith.H:20`). **There is no hour-angle output** — `h` in `orbital_avg_cos_zenith` is the half-day length. `OMG_URB2D` is new code: `OMG = 2π·frac(jday) + lon_rad − π`, verified against `tloc` giving 12 at local solar noon. `XLAT` must reach `urban()` in **degrees**. |
+| **Advance dispatch** | `ERF_AdvanceLSM.cpp:13` hard-codes `LandSurfaceType::NOAHMP`. **Non-issue under Design A** — noted only to stop someone adding a `LandSurfaceType::SLUCM`. |
 
 ## 5. Architecture decision
 
 **Recommendation: SLUCM as an urban tile inside the Noah-MP Fortran driver**
-(design A), mirroring `NCAR/noahmp`'s `drivers/wrf/NoahmpUrbanDriverMainMod.F90`.
+(design A), mirroring `drivers/wrf/NoahmpUrbanDriverMainMod.F90`. Reject an
+ERF-native C++ scheme (design B) because:
 
-The alternative (design B) is an ERF-native C++ scheme — a new
-`LandSurfaceType::SLUCM` deriving from `NullSurf`. Reject it, because:
+- The rural-tile contract already exists in `ConfigVarInTransferMod.F90:155-165`.
+- `LandSurface` holds **one model per level** and `SetModel<T>()`
+  (`ERF_LandSurface.H:29-36`) assigns the same type to every level, so
+  "Noah-MP for the rural tile, SLUCM for the urban tile" is unreachable by
+  construction. *(The first draft cited the `typeid` guard at
+  `ERF_LandSurface.H:153-165`. That guard compares two
+  `std::unique_ptr<NullSurf>` — non-polymorphic, resolved statically, always
+  true. The conclusion holds; the mechanism cited did not.)*
+- `TSK`/`ALBEDO`/`EMISS` feed RRTMGP; blending in Fortran keeps one source of truth.
+- Bit-level traceability to WRF is the validation strategy (§8.4).
 
-- The mosaic contract already exists in `ConfigVarInTransferMod.F90:155-165`.
-  Design B would have to re-implement "Noah-MP over the rural fraction" from
-  outside the Fortran model.
-- `LandSurface` holds **one model per level**, and `Set_Lev0_*_Ptr` aborts if the
-  model type differs across levels (`ERF_LandSurface.H:153-185`). You cannot run
-  "Noah-MP for the rural tile plus SLUCM for the urban tile" as two `NullSurf`
-  instances.
-- `TSK`, `ALBEDO`, and `EMISS` feed RRTMGP. Blending inside the Fortran driver
-  keeps one source of truth; design B needs a second blending layer in ERF.
-- Bit-level traceability to WRF for validation — the whole point of adopting a
-  published scheme rather than writing a new one.
+Costs accepted: vendoring WRF Fortran into the fork, and SLUCM staying host-side
+(matching Noah-MP, which already round-trips device→host each step).
 
-Costs of A, accepted knowingly: we vendor WRF Fortran into the `erf-model/noahmp`
-fork (WRF is in the public domain, so this is clean, but provenance and the
-upstream revision must be recorded in the file header), and SLUCM stays host-side
-— which matches how Noah-MP already runs, since `Advance_With_State` already does
-a device→host staging round-trip (`spec-noahmp-gpu.md`). The `@internal` tier
-described in `spec-add-coupled-variable.md` §"Step 0" is designed for exactly this
-case: urban state arrays get generated storage, allocation, and (later) device
-residency at **zero ABI cost**.
-
-**Where design B *would* be right**: a multi-layer scheme (BEP / BEP+BEM) that
-injects drag, heat, and TKE at several model levels is not a pure LSM tile — it
-reaches into `ERF_MakeMomSources.cpp` the way `ForestDrag` does. That is future
-work; the `a_u_bep`, `a_t_bep`, `sf_bep`, `vl_bep` arrays are already declared in
-`NoahmpIOVarType.F90-mc`, so the door is open.
+**Where design B would be right**: a multi-layer scheme (BEP/BEP+BEM) injecting
+drag and TKE at several levels is not an LSM tile — it belongs in
+`ERF_MakeMomSources.cpp` like `ForestDrag`. Future work; the `a_u_bep`,
+`a_t_bep`, `sf_bep`, `vl_bep` arrays are already declared.
 
 ## 6. Phased plan
 
-### Phase 0 — groundwork (no code)
+Reordered from the first draft: unblocked, independently-useful ERF-side work and
+the missing test infrastructure now come **first**, because Phases with "Fortran"
+in them are all inside `erf-model/noahmp`.
 
-- Record the WRF revision SLUCM is taken from, and open a tracking issue on
-  `erf-model/ERF` describing the mosaic design so upstream sees it before the PR.
-- Decide the exchange-coefficient question (§7) and the reference-height guard
-  (§7) — both change the Fortran argument list, so settle them first.
-- Build a WRF `sf_urban_physics = 1` reference case over the same domain as
-  `Exec/RegTests/WPS_Test` to validate against.
+### Phase 0 — decisions and prerequisites (no SLUCM code)
 
-### Phase 1 — Fortran: vendor SLUCM into the submodule fork
+Four decisions, all of which change later code, plus two prerequisite bug fixes:
 
-Work in `erf-model/noahmp`, branch off the pinned `e0aed20`:
+1. **`CHS` is settled — do not defer.** `CHS` is `INTENT(INOUT)` but never
+   modified inside `urban()`; it is used only in `TS = TA + FLXTH/CHS` and
+   `QS = QA + FLXHUM/CHS`. `SH`, `LH`, `G`, `RN`, `UST` and all prognostic state
+   are independent of it. Pass `NoahmpIO%CHXY` (Noah-MP's `ExchCoeffShSfc` —
+   same quantity, same units `[m/s]`, same column, same reference height),
+   floored at `1.0e-2` as WRF does. `CHS2 = FVEG·CHV2XY + (1−FVEG)·CHB2XY`.
+   Do **not** enable the commented-out internal `CHS` lines — that breaks
+   bit-comparability with WRF. Combined with the radiative-`TSK` fix (§4), `CHS`
+   stops affecting anything ERF consumes for radiation.
+   *(Note: `SFCDIF` is not a `URBPARM.TBL` key. The real knobs are `CH_SCHEME`
+   (1 = M-O via `mos`; 2 = Narita, the default) and `AKANDA_URBAN`. `SFCDIF_URB`
+   is always used above canopy; `louis79`/`louis82` are dead code.)*
+2. **Reference height.** Decide that ERF stages `ZLVL` from the true `z(klo)`
+   (§7.2) rather than the namelist constant, and fix the resulting
+   `RefHeightAboveSfc` inconsistency in Noah-MP.
+3. **Precision strategy** (§7.5) — per-source promotion flags, not a 5620-line
+   kind rewrite.
+4. **Supported envelope** (§7.2) — `dx ≳ 1 km` and `z₁ ≥ 2·max(ZR)`, aborting outside.
 
-1. Add `drivers/erf/module_sf_urban.F` from WRF `phys/`, with:
-   - a small `NoahmpUrbanShimMod.F90` (or reuse `NoahmpFatalMod.F90`) providing
-     `wrf_message`/`wrf_error_fatal` → `NoahmpIO_abort`, and `piconst`;
-   - **explicit kind conversion**: the submodule builds with `DOUBLE_PREC` and
-     `c_kind_noahmp`, while `module_sf_urban.F` uses bare `REAL`. Convert
-     declarations to `real(kind=kind_noahmp)` rather than relying on
-     `-fdefault-real-8`, which is not portable across the compilers ERF supports.
-2. Add `drivers/erf/NoahmpUrbanDriverMainMod.F90`, copied from `drivers/wrf/` and
-   reduced to the `sf_urban_physics == 1` branch (lines 411–655 plus the
-   `*_RURAL` snapshot at 400–409 and the combined-radiation epilogue). Keep the
-   BEP/BEM branches out of Phase 1; leave a clearly marked stub.
-3. Call it from `drivers/erf/NoahmpDriverMainMod.F90` **after** the `JLOOP`/`ILOOP`
-   over land columns, guarded by `if (NoahmpIO%SF_URBAN_PHYSICS == 1)`.
-4. Call `urban_param_init` and `urban_var_init` from `NoahmpInitMainMod.F90`
-   under the same guard; ship `URBPARM.TBL` next to `NoahmpTable.TBL`.
-5. Extend `NoahmpReadLandMod.F90` to read `FRC_URB2D`, `URB_PARAM` (or the
-   individual `LP/LB/HGT/MH/STDH/LF_URB2D` fields), and `LU_INDEX`/LCZ from the
-   wrfinput file, `NOT_FATAL` with sane defaults so non-urban runs are unaffected.
-6. Add the new files to `drivers/erf/CMakeLists.txt` and `drivers/erf/Makefile`.
+Prerequisite fixes, each its own PR:
 
-### Phase 2 — interface: coupled variables
+- **Wire `JULIAN`/`YR`/`GMT`.** `NoahmpIOVarInitMod.F90-mc:882-883` hard-sets
+  `YR = 2000`, `JULIAN = 1.0` ("wire via ABI for correctness") and nothing ever
+  updates them. This already breaks Noah-MP phenology under
+  `DYNAMIC_VEG_OPTION = 4` (what `WPS_Test` uses) and silently disables the
+  existing urban irrigation. SLUCM's entire shadow/solar model keys off it.
+- **Hoist `CAL_MON_DAY`** from `NoahmpDriverMainMod.F90:224` into `utility/`
+  (§7.3).
 
-Follow `Submodules/Noah-MP/drivers/erf/dev/spec-add-coupled-variable.md` exactly.
+### Phase 1 — ERF-side work that needs no submodule change
 
-- Add one line per crossing variable to the `@NoahmpMacro:Source m_noahmpio { … }`
-  block in `NoahmpIO.H-mc` — inputs first (`FRC_URB2D`, `UTYPE_URB2D`, morphology,
-  `XLONG`), then the scalars (`JULIAN`, `YR`, `GMT`, `DECLIN`), then any
-  diagnostics we choose to export.
-- Because `FRC_URB2D` and friends **already exist as hand-written Fortran
-  allocatables**, this is the *promotion* path: delete the hand-written
-  declaration in `NoahmpIOVarType.F90-mc` and the hand-written `allocate()` in
-  `NoahmpIOVarInitMod.F90-mc` for each promoted variable, or the build fails with
-  a duplicate-component error.
-- `make codegen && make codegen-check` must be clean.
-- Sentinel-guard the namelist scalars (`if (NoahmpIO%x == undefined_real) …`) so a
-  C++-supplied value wins over the namelist.
-- Bump the `Submodules/Noah-MP` pin in ERF.
+Deliverable in `sunt05/ERF` alone, and useful with or without SLUCM:
 
-### Phase 3 — ERF driver
+1. **CI that builds Noah-MP at all.** `grep -i noahmp .github/workflows/` returns
+   nothing across all 18 workflows, so `Tests/Unit/LandSurfaceModel/Noah-MP/ERF_GTestNoahMPResultPolicy.cpp`
+   — behind `if(ERF_ENABLE_NOAHMP)` at `Tests/Unit/CMakeLists.txt:149` — **has
+   never compiled in CI**. Clone `gcc-rrtmgp.yml`, add `gfortran`,
+   `libnetcdff-dev`, `python3`, `submodules: recursive`, `-DERF_ENABLE_NOAHMP=ON`.
+   Everything else depends on this existing.
+2. **Regression baseline.** `Tests/CTestList.cmake` has no Noah-MP or WPS entry
+   and `Exec/RegTests/WPS_Test/` has no `GNUmakefile`. Without this, §8.3 has
+   nothing to compare against.
+3. **`ZNT` → MOST roughness.** Append `X(znt)` / `X(o_znt, ZNT)` / `X(ZNT_o, znt, o_znt)`
+   to the three registries in `ERF_NOAHMP_Fields.H`; add `RoughCalcType::LSM` and
+   accept `erf.most.roughness_type_land = "lsm"` (`ERF_SurfaceLayer.H:211-215`);
+   fill `z_0[lev]` as `get_lsm_tsurf` fills `t_surf`. Carries rural/bulk
+   roughness only until the Phase 2 write-back lands — say so in the docs.
+4. **`urb_frac_lev` becomes live.** Add `FRC_URB2D` and `LU_INDEX` to
+   `ERF_ReadFromWRFInput.cpp:125-129`, fill it in `ERF_InitFromWRFInput.cpp`,
+   change the default from `setVal(one)` to zero (`ERF_MakeNewArrays.cpp:503`),
+   and register it in `ERF_Plotfile2DCatalog.cpp` so ingestion is verifiable.
+5. **Parameter-check aborts** for SLUCM together with `ImmersedForcing` **or**
+   `ForestDrag`, where `buildings_type`/`lsm_type` are parsed.
+6. **Feature-coupling parity.** `Exec/Make.ERF.general:36-41` forces
+   `USE_NOAHMP ⇒ USE_RRTMGP ⇒ USE_KOKKOS/NETCDF`; CMake has no such rule, so
+   `-DERF_ENABLE_NOAHMP=ON -DERF_ENABLE_RRTMGP=OFF` is a config the make path
+   cannot express. Encode or explicitly reject it.
+7. **Unit tests** for 3 and 4, registered in the now-live `if(ERF_ENABLE_NOAHMP)` block.
 
-`Source/LandSurfaceModel/Noah-MP/`:
+### Phase 2 — Fortran: vendor SLUCM into the submodule fork
 
-- `ERF_NOAHMP_Fields.H` — add the new forcing rows to `NOAHMP_INPUT_2D_FIELDS`
-  and, if we export urban diagnostics, rows to `NOAHMP_LSMDATA_FIELDS`,
-  `NOAHMP_OUTPUT_2D_FIELDS_TAIL`, and `NOAHMP_RESULT_FIELDS`. **Append only** —
-  enum order is an invariant.
-- `ERF_NOAHMP_Advance.cpp` — in `stage_forcing`, compute the solar geometry
-  (`orbital_decl` for `DECLIN`, the hour angle for `OMG`) and stage `JULIAN`,
-  `YR`, `GMT`. These are per-step scalars, so set them next to `itimestep` rather
-  than through the pinned FAB.
-- `ERF_NOAHMP_Init.cpp` — after `ReadLandMain()`, copy `FRC_URB2D` into
-  `urb_frac_lev[lev][0]` so the rest of ERF can see the urban fraction, and
-  assert that `SF_URBAN_PHYSICS == 1` implies a per-level land file (see the AMR
-  risk in §7).
-- `Source/ERF_MakeNewArrays.cpp` / `Source/ERF.H` — no new fields needed;
-  `urb_frac_lev` just stops being dead.
-- Optionally register the urban diagnostics in the 2-D plotfile catalog
-  (`Source/IO/ERF_Plotfile2DCatalog.cpp`), following the pattern added by
-  upstream #3465.
+Branch off `e0aed20`. **Both build systems glob**, so no build-file edits are
+needed for new `*.F90` in `drivers/erf/` — but two naming constraints bind:
+the extension must be `.F90`, and **the basename must equal the module name**,
+because the Makefile's dependency generator emits `obj/<module-in-use-stmt>.o`
+for every `use` (`Makefile:83-84`).
 
-### Phase 4 — roughness and displacement height (optional, structural)
+1. `drivers/erf/module_sf_urban.F90` — renamed, `use` lines redirected to the
+   shim, with a small **documented patch list** (§7.6), each marked `! ERF: <reason>`.
+2. `drivers/erf/NoahmpUrbanShimMod.F90` — `wrf_message`, `wrf_error_fatal`,
+   `piconst`, `KARMAN`, `CP`, `XLV`. **Do not** name it `module_model_constants`:
+   ERF already ships `Source/Microphysics/Morrison/ERF_module_model_constants.F90`
+   declaring that module with its own `piconst`, and the GNU make path puts the
+   submodule's `include/` (which receives every `.mod`) on ERF's
+   `INCLUDE_LOCATIONS` — so `USE_MORR_FORT=TRUE` + `USE_NOAHMP=TRUE` can resolve
+   the wrong `.mod`.
+3. `drivers/erf/NoahmpUrbanDriverMainMod.F90` — SLUCM branch only, BEP/BEM
+   branches and their `use` lines dropped. **Add** the outputs from §4:
+   `TAU_EW/NS` blend, four banded albedos, `EMISS` + an urban effective
+   emissivity, radiative `TSK` via the ported radiation algebra. Snapshot
+   `TAU_EW/NS` and `EMISS` into the `*_RURAL` block. Delete the hard-coded
+   `IF (I.EQ.73.AND.J.EQ.125)` debug point at lines 530-532.
+4. Declare the nine missing arrays (§3) if `TREEOPTION`/distributed aerodynamics
+   are ever enabled; otherwise scope them out and assert the options are off.
+5. Call the driver from `NoahmpDriverMainMod.F90` under
+   `if (SF_URBAN_PHYSICS == 1)`; call `urban_param_init`/`urban_var_init` from
+   `NoahmpInitMainMod.F90` behind a **once-per-process latch** — `InitMain()`
+   runs per box (`ERF_NOAHMP_Init.cpp:196`) while those routines populate
+   module-level `SAVE`d tables and `OPEN` `URBPARM.TBL`.
+6. Guard `SF_URBAN_PHYSICS == 1 .and. NSOIL /= 4` — `urban_param_init` forces
+   `num_roof/wall/road_layers = num_soil_layers` and `urban_var_init` hard-codes
+   `TRL_URB3D(I,1..4,J)`.
+7. Set `VEGFRA = 0.96*100` alongside `GVFMAX` in `ConfigVarInTransferMod.F90`
+   (§7.4), or abort for `OptDynamicVeg ∈ {1,6,7}`.
+8. Ship `URBPARM.TBL`; ship `URBPARM_LCZ.TBL` or gate `USE_WUDAPT_LCZ = 0`.
 
-Only worth doing once Phase 1–3 validate. Two independently sized pieces:
+### Phase 3 — interface (coupled variables)
 
-- **Roughness (cheap).** `ZNT` already crosses the boundary, so this is
-  ERF-side only: add a `znt` row to `NOAHMP_LSMDATA_FIELDS` /
-  `NOAHMP_OUTPUT_2D_FIELDS_TAIL` / `NOAHMP_RESULT_FIELDS`, add
-  `RoughCalcType::LSM` and accept `erf.most.roughness_type_land = "lsm"`
-  (`ERF_SurfaceLayer.H:205-215`), then fill `z_0[lev]` from that field the way
-  `get_lsm_tsurf` fills `t_surf`. This is useful on its own even without SLUCM,
-  since Noah-MP already varies `ZNT` by land-use type.
-- **Displacement height (expensive).** Introduce a `d0` field and use
-  `log((zref − d0)/z0)` in `ERF_MOSTStress.H`. This touches every flux iterator,
-  so it needs its own spec and its own PR — **do not fold it into the SLUCM PR**.
+Per `spec-add-coupled-variable.md`, with four corrections the first draft missed:
 
-### Phase 5 — tests, docs, regression case
+- **Always append** to the `@NoahmpMacro:Source` block. Order *is* ABI order, the
+  mirror is a flat pointer array, and `NoahmpIO_AssertAbi()` checks **only
+  element precision** — there is no member-count check. With a half-stale build
+  (the GNU path links a prebuilt `libnoahmp.a` and `cp -u`s the header), an
+  appended member is merely garbage while a **middle insertion silently corrupts
+  every later slot**. Add `NoahmpIO_NumMembers_fi()` to the ABI assert.
+- **`utype_urb2d` cannot cross today.** `tools/NoahmpMacro.py` matches only
+  `NoahmpArray[23]D<noahmp_real>` and `KIND_TRAITS["array"]` hardcodes
+  `real(kind=c_kind_noahmp)` — there is no integer-array kind (which is why
+  `IVGTYP`/`ISLTYP` are hand-written). Either extend the generator with an
+  `iarray` kind (one regex + one traits row; `NoahmpArray.H` is already
+  `template <typename T>`) or keep it Fortran-side.
+- **Promotion turns a guarded allocate into an unconditional one.** The urban
+  arrays are allocated inside `if (SF_URBAN_PHYSICS > 0)` and their sentinel
+  initialisation sits in a **second** guarded block. Promote and the generated
+  allocate becomes unconditional while the sentinel init stays guarded — leaving
+  them **allocated but uninitialised** in every non-urban run, so C++ reading
+  `FRC_URB2D` gets garbage rather than a detectable sentinel. Move the sentinel
+  assignments to the unconditional block, or do not promote.
+- **Scalars have no allocate to delete.** `JULIAN`/`GMT`/`DECLIN`/`YR` become
+  C++-owned pointers on promotion, so every existing Fortran write becomes a
+  write through that pointer and must be sequenced against `ScalarInitDefault()`.
 
-- **Unit test**, mirroring `Tests/Unit/LandSurfaceModel/Noah-MP/ERF_GTestNoahMPResultPolicy.cpp`:
-  extract the mosaic blend into a small pure header (e.g.
-  `ERF_NOAHMP_UrbanTile.H`, a `blend(frc, urban, rural)` helper) and test it
-  directly — `frc = 0` reproduces the rural value bitwise, `frc = 1` the urban
-  value, sentinel propagation is correct. Register it in
-  `Tests/Unit/CMakeLists.txt` inside the existing `if(ERF_ENABLE_NOAHMP)` block.
-- **Fortran unit test** under `Submodules/Noah-MP/drivers/erf/tests/` for
-  `urban_param_init` reading `URBPARM.TBL`.
-- **Regression case**: a `WPS_Test`-derived urban case with
-  `SF_URBAN_PHYSICS = 1`, added to `Tests/CTestList.cmake`. Note there is
-  currently **no** Noah-MP regression test and no CI job setting
-  `ERF_ENABLE_NOAHMP` — adding one is a prerequisite, and is worth doing on its
-  own merits.
-- **Docs**: `Docs/sphinx_doc/CouplingToNoahMP.rst` gains an "Urban canopy" section
-  (build flags, `namelist.erf` keys, required wrfinput fields, `URBPARM.TBL`);
-  `Docs/sphinx_doc/Inputs.rst:1918-1938` gains the urban rows;
-  `Docs/sphinx_doc/ERFvsWRF.rst:69` is updated so urban is no longer described as
-  immersed-forcing-only. Add `spec-slucm-tile.md` next to this plan and index it
-  in `dev/README.md`.
+Settle the static-field design **once**: static urban fields stay Fortran-side
+via `ReadLandMain`; only `FRC_URB2D` crosses, once, out, at init. `XLONG` need
+not cross — `NoahmpReadLandMod.F90:187` already reads it. `NOAHMP_INPUT_2D_FIELDS`
+is the wrong home regardless: it is the **per-step** staging table, so static
+morphology would be re-copied every timestep.
+
+### Phase 4 — ERF driver
+
+- `ERF_NOAHMP_Fields.H`: append rows for the §4 outputs. **Adding
+  `NOAHMP_LSMDATA_FIELDS` rows changes `m_lsm_data_size` and invalidates existing
+  checkpoints** — call this out in the release notes.
+- `ERF_NOAHMP_Advance.cpp`: stage `DECLIN`, `OMG`, `JULIAN`, `YR`, `GMT`, and the
+  true `ZLVL`; take `q_flux = QFX/ρ`.
+- `ERF_NOAHMP_Init.cpp`: copy `FRC_URB2D` into `urb_frac_lev`; require a per-level
+  land file when SLUCM is on (urban morphology must not be interpolated across
+  levels by `interp_from_lev0`).
+
+### Phase 5 — validation
+
+See §8.
 
 ## 7. Risks and open questions
 
-1. **Double counting with immersed forcing.** If `erf.buildings_type = "ImmersedForcing"`
-   and SLUCM are both active on the same level, buildings are represented twice —
-   once as resolved geometry (`lmask == 2`, zero surface flux, `ERF_SurfaceLayer.cpp:591,632,692,735`)
-   and once as a canopy parameterization. **Abort at parameter-check time.**
-2. **Reference height in the grey zone.** SLUCM assumes the forcing level is above
-   the canopy. The ERF driver currently sets `DZ8W = 2·ZLVL` and
-   `P8W(:,2,:) = P8W(:,1,:)` (`NoahmpDriverMainMod.F90:52-66`), and SLUCM takes
-   `ZA_URB = 0.5·DZ8W(i,1,j)`. With typical ERF vertical resolution the first
-   level can sit *inside* the canopy. Add an explicit guard comparing `ZA_URB`
-   against `HGT_URB2D` and either abort or document a minimum first-level height.
-3. **Exchange coefficients.** WRF passes `CHS`, `CHS2`, `CQS2` from the surface-layer
-   scheme into SLUCM; ERF's Noah-MP driver does not plumb them. Either derive them
-   from `SurfaceLayer`'s `u*`/`t*` or let SLUCM use its internal `SFCDIF_URB` /
-   `mos` / `louis` options (`AHOPTION`/`SFCDIF` in `URBPARM.TBL`). **Decide in
-   Phase 0** — it changes the argument list.
-4. **Precision.** See Phase 1.1. Getting this wrong produces silently wrong
-   numbers, not a crash.
-5. **AMR.** `interp_from_lev0` (`ERF_NOAHMP_Advance.cpp:23-52`) interpolates all
-   LSM data and fluxes from level 0 when a fine level has no NetCDF land file.
-   Urban morphology is strongly heterogeneous and interpolating `FRC_URB2D` across
-   levels is not defensible. **Require a per-level land file when SLUCM is on.**
-6. **GPU.** SLUCM is host-only. No new sync points are introduced (the staging
-   round-trip already exists), but the GPU-offload plan
-   (`Submodules/Noah-MP/drivers/erf/dev/plan-cpp-interface.md`) must account for it.
-7. **Vendoring drift.** Once `module_sf_urban.F` lives in our fork it will drift
-   from WRF. Record the source revision in the file header and keep the file
-   otherwise unmodified apart from the kind and shim changes, so a future
-   re-sync is a readable diff.
-8. **Licensing.** `erf-model/noahmp` carries the **UCAR Noah-MP license** (royalty-free,
-   no resale, attribution required on derived works). WRF is public domain, so
-   vendoring `module_sf_urban.F` and `URBPARM.TBL` into the fork is clean — but
-   add the WRF attribution header and cite Kusaka et al. (2001) / Chen et al.
-   (2011) in the docs, as the UCAR license requires for derived works.
-9. **Build prerequisites.** The submodule's CMake runs `tools/NoahmpMacro.py` at
-   configure time and requires Python 3; its source glob covers `src/`,
-   `utility/`, and **`drivers/erf/` only** — `drivers/wrf/` is never compiled.
-   New Fortran must land in `drivers/erf/` (or `src/`) to be built at all.
+1. **Double counting.** Abort if SLUCM is active with `buildings_type = ImmersedForcing`
+   or `ForestDrag` on the same level.
+2. **Reference height — the real problem is inconsistency, not the guard.**
+   `ZA_URB = 0.5·DZ8W` and `DZ8W = 2·ZLVL`, so `ZA_URB ≡ ZLVL` — the **namelist
+   constant** (`WPS_Test` uses `ZLVL = 10.0`), not where ERF samples forcing
+   (`k = klo`, cell centre **46.875 m** in that case). A third value,
+   `erf.most.zref = 1.0`, sits in the inputs file. With the shipped `URBPARM.TBL`
+   (`ZDC ≈ 0.762·ZR`), `urban()` hard-`FATAL_ERROR`s when `ZA ≤ ZDC + Z0C + 2`:
+
+   | urban type | ZR | ZDC | Z0C | aborts if `ZA ≤` | canyon-wind fallback if `ZA ≤` |
+   |---|---|---|---|---|---|
+   | 1 low-density residential | 5.0 | 3.81 | 0.172 | 5.98 m | 7.0 m |
+   | 2 high-density residential | 7.5 | 5.72 | 0.333 | 8.05 m | 9.5 m |
+   | 3 commercial | 10.0 | 7.62 | 0.531 | 10.16 m | 12.0 m |
+
+   So `ZLVL = 10.0` **aborts the run** at the first commercial cell and silently
+   degrades type 2 to `ZC = ZA/2; UC = UA/2`. With the true 46.9 m everything
+   passes. Fix: stage `ZLVL` from `z(klo)`; require `ZA ≥ max(ZDC + Z0C + 2, ZR + 2)`
+   and warn unless `ZA ≥ 2·ZR` (MOST is valid only above the roughness sublayer,
+   2-5 building heights). **Supported envelope: `dx ≳ 1 km` and `z₁ ≥ 2·max(ZR)`;
+   abort outside it.** At grey-zone `dx` users refine `Δz` to O(10-20 m), putting
+   `z₁` inside the canopy, and at `dx ≲ 500 m` the horizontal-homogeneity
+   assumption behind `FRC_URB2D` fails anyway.
+3. **Circular module dependency.** The urban driver needs `cal_mon_day`, which
+   lives inside `NoahmpDriverMainMod` — the module that will *call* the urban
+   driver. `use NoahmpDriverMainMod` there is a hard gfortran error and a literal
+   cycle in the generated `.d` files. Hoist it to `utility/` first.
+4. **Rural tile is under-specified.** `GVFMAX = 96 %` only works for
+   `OptDynamicVeg ∈ {2,3,4,5,8,9}`; for `{1,6,7}` the rural tile inherits the
+   urban cell's greenness (5-20 %) and the mosaic is meaningless. Also: LAI from
+   the wrfinput time series is near zero over urban cells under
+   `DYNAMIC_VEG_OPTION ∈ {7,8,9}`; `ISLTYP` is often a placeholder; **SLUCM has
+   no snow at all** (no roof/road snow albedo or melt) so winter cases must not
+   be used for Phase-1 validation; `RAIN_URB` treats snow as liquid; and
+   `SFCRUNOFF`/`UDRUNOFF`/`SMSTOT` are whole-cell values that physically exist
+   only over `(1−frc)`.
+5. **Precision.** The submodule builds `DOUBLE_PREC`/`c_kind_noahmp`;
+   `module_sf_urban` uses bare `REAL`. A 5620-line kind rewrite contradicts
+   keeping the vendored diff readable. Use per-source promotion flags —
+   gfortran `-fdefault-real-8 -fdefault-double-8` (**both**, or `DOUBLE PRECISION`
+   becomes 16 bytes), Intel/NVHPC `-r8`, Cray `-s real64` — via
+   `set_source_files_properties` and a file-specific make rule. Guard the
+   single-precision build.
+6. **Latent defects in the vendored revision.** This revision of
+   `module_sf_urban.F` has uninitialised reads (`TGEP = TGE`, `SROOTP = SROOT`;
+   `IRI_SCHEME = 1` reading `tloc` assigned only under `ahoption == 1`; `SW`
+   reused as street width), and a `print*` inside the `TREEOPTION = 1` shortwave
+   branch that emits one line per urban column per step. All are dormant at the
+   shipped defaults but argue for a documented patch list rather than "unmodified".
+7. **Default option set.** `AHOPTION`, `ALHOPTION`, `GROPTION`, `TREEOPTION`,
+   `IRI_SCHEME` are **all 0** by default and `IMP_SCHEME = 1`. Phase 1 ships
+   exactly those — the WRF-comparable configuration, and the only one whose code
+   paths avoid the §7.6 defects. Expose `AHOPTION` (anthropogenic heat) as a
+   documented knob since it needs only `AH_TBL`/`AHDIUPRF` plus a correct `OMG`;
+   keep `TREEOPTION`/`GROPTION` out until upstream fixes the uninitialised state.
+8. **Direct/diffuse partitioning is hard-coded.** `module_sf_urban.F:948-951`
+   sets `SSGD = 0.75·SSG` unconditionally, discarding both the driver's argument
+   and ERF's real banded direct/diffuse fluxes from RRTMGP. Under overcast skies
+   SLUCM casts shadows that do not exist. Route ERF's real direct fraction in
+   behind a flag defaulting to WRF behaviour.
+9. **`urban_var_init` on restart clobbers state.** `QC_URB2D = 0.01` sits
+   **outside** the `IF (.not.restart)` guard. Decide explicitly whether ERF calls
+   it on restart; if so, move that line inside the guard.
+10. **Thread safety.** `module_sf_urban`'s module-level `SAVE` state is not
+    thread-safe. Safe today (`ERF_NOAHMP_Advance.cpp:387`'s `MFIter` loop has no
+    OpenMP pragma, `USE_OMP = FALSE`), but it blocks future OpenMP tiling.
+11. **Licensing.** WRF is public domain, so vendoring in is clean; but the
+    combined fork stays under the UCAR Noah-MP license, whose no-resale clause is
+    a redistribution constraint on BSD-3 ERF. Status quo (Noah-MP is already a
+    submodule) — but get it confirmed rather than asserted.
+12. **Vendoring drift.** Record the WRF source revision in the file header so a
+    future re-sync is a readable diff.
+13. **Submodule ownership.** Phases 2-3 are entirely inside `erf-model/noahmp`.
+    Work on a personal fork (`.gitmodules` `url` is a one-line change and
+    `shallow = false` already), then PR upstream and flip the URL back before merge.
 
 ## 8. Verification
 
-1. `make codegen-check` clean; `NoahmpIO_AssertAbi()` does not abort.
-2. Build both ways — `cmake -DERF_ENABLE_NOAHMP=ON -DERF_ENABLE_NETCDF=ON` and
-   `make USE_NOAHMP=TRUE USE_NETCDF=TRUE` — since both build systems list Noah-MP
-   sources explicitly and must be updated together.
-3. **Null test (the important one):** with `SF_URBAN_PHYSICS = 0` the existing
-   `WPS_Test` case must reproduce its current trajectory **bitwise**. The urban
-   code is entirely behind that guard.
-4. **Degenerate-tile test:** with `SF_URBAN_PHYSICS = 1` and `FRC_URB2D ≡ 0`,
-   results must match the `NATURAL_TABLE` rural run to round-off — this isolates
-   the blend from the physics.
-5. **Physics test:** urban case vs the Phase-0 WRF `sf_urban_physics = 1`
-   reference. Compare the diurnal cycle of `TSK`, `HFX`, `LH`, and 2-m
-   temperature over urban cells; expect the canonical urban signature — reduced
-   latent flux, elevated storage, a nocturnal heat-island offset over the rural
-   tile. Exact agreement with WRF is not expected (different dycore, different
-   surface layer); a matching *sign and magnitude* of the urban–rural contrast is.
-6. Unit tests from Phase 5 pass; the new regression case is added to
-   `Tests/ERFGoldFiles`.
-7. Restart round-trip: the urban prognostic state (`TR/TB/TG/TC`, `TRL/TBL/TGL`,
-   `XXX*`) must be carried through checkpoint/restart via
-   `NoahmpWriteRestartMod.F90` / `NoahmpReadRestartMod.F90`, or a restarted run
-   will cold-start the canopy and diverge. Verify bitwise restart as
-   `spec-noahmp-io.md` requires.
+`make codegen-check` is **not** a verification: the Makefile runs the generator
+at parse time (`$(info … $(shell python3 …))`) and CMake at configure time, so
+the check always compares against files it just rewrote, and the targets are
+gitignored. Either drop it or make the Makefile skip the parse-time run when
+`MAKECMDGOALS` is `codegen-check`.
+
+1. **Build both paths** — CMake and GNU make — and confirm `NoahmpIO_AssertAbi()`
+   does not abort.
+2. **Null test.** With `SF_URBAN_PHYSICS = 0`, `WPS_Test` reproduces its
+   trajectory **bitwise**. Requires the Phase-1 baseline to exist first.
+3. **Per-column energy-balance closure** (cheapest, highest value). In a debug
+   build, for every urban column every step, assert
+   `|RN_URB − SH_URB − LH_URB − G_URB| < 1e-6·max(1,|RN_URB|)`. All four are
+   already outputs of `urban()`. Catches unit, sign and option-branch errors
+   immediately.
+4. **Grid-cell closure across the blend.** Assert
+   `SWDOWN·(1−α_blend) + ε_blend·GLW − LW_up_blend = HFX + LH + GRDFLX`.
+   **This fails against the first draft's design** — it is precisely what exposes
+   the missing banded albedo and emissivity, and why §4's radiation fix is
+   mandatory rather than optional.
+5. **Offline single-column benchmark.** Drive the vendored `urban()` with the
+   Grimmond et al. (2010, 2011) international urban energy-balance comparison
+   forcing (Vancouver–Sunset, Melbourne–Preston) and compare `Q*`, `Q_H`, `Q_E`,
+   `ΔQ_S` against the published SLUCM submission and the observations. This is
+   the only test that separates "we broke the port" from "we broke the coupling".
+6. **Single-column WRF↔ERF bit-comparison.** Identical forcing arrays, identical
+   `URBPARM.TBL`, one column, 48 h; require `SH/LH/G/TS/TR/TB/TG` agreement to
+   `< 1e-10` relative in double precision. Achievable because it is the same
+   Fortran, and it is the real regression guard on the vendoring and the kind
+   handling. Keep a 3-D WRF comparison as a sanity check, **not** as the
+   acceptance gate — dycore differences swamp it.
+7. **`frc` sweep.** `frc ∈ {0, 0.25, 0.5, 0.75, 1}` on a single column; assert
+   every blended quantity is exactly linear in `frc` and that `frc = 1`
+   reproduces the pure-urban run. *(The first draft's "set `FRC_URB2D ≡ 0`" test
+   is not executable: `urban_var_init` detects `FRC_URB2D ≤ 0` on an urban
+   `IVGTYP` and overwrites it with `FRC_URB_TBL(UTYPE)` = 0.5/0.9/0.95. To test
+   the null path, set every urban `IVGTYP` to `NATURAL_TABLE` instead.)*
+8. **Reference-height sensitivity sweep.** `ZA ∈ {6,10,15,20,30,47,60}` m per
+   urban type, tabulating `ΔSH`, `ΔTS`, `Δu*`. Turns §7.2's envelope from a guess
+   into a documented number.
+9. **Spin-up.** `TRL/TBL/TGL` initialise from `TSK`/`TSLB` — a poor guess for
+   concrete at `CAPR = 1e6 J m⁻³ K⁻¹`. Require day-N → day-N+1 drift in `TBL(4)`
+   below 0.1 K and state a minimum spin-up (5-10 days) before any observational
+   comparison, or §8.5's "nocturnal heat-island offset" measures initialisation.
+10. **Restart, per variable.** Dump and diff **every** state variable across the
+    restart boundary, not just the trajectory. The minimal bitwise set:
+    `tr/tb/tg/tc/qc_urb2d`; `trl/tbl/tgl_urb3d(1:4)`; `xxx{r,b,g,c}_urb2d`;
+    **`cmr/chr/cmc/chc_sfcdif`** (the `SFCDIF_URB` iteration state, relaxed with
+    `WOLD = 0.15` — genuinely prognostic and missed by the first draft);
+    `flxhum{r,b,g}_urb2d` and `drel{r,b,g}_urb2d` (their `*P = *` prologue is
+    unconditional). Add `cmcr/tgr/tgrl/smr` if `GROPTION = 1`, and the tree set
+    if `TREEOPTION = 1`. `uc_urb2d` is diagnostic (recomputed from `UA` before
+    first use). None of these appear in `NoahmpWriteRestartMod.F90` today.
