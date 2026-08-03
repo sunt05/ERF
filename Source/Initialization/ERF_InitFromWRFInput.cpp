@@ -271,6 +271,12 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev)
             amrex::Print() << "Warning: LSM model is being used, but no mapping is defined to fill its variables from WRFinput!" << std::endl;
         }
     }
+    // Urban fraction. This is optional static input: standard wrfinput files do not
+    // carry FRC_URB2D unless they were produced with an urban physics option, so it
+    // is listed in the has_fallback_behavior disjunction below. When it is absent,
+    // urb_frac_lev keeps the zero default set in ERF::MakeNewLevelFromScratch, i.e.
+    // "no urban tile anywhere".
+    NC_names.push_back("FRC_URB2D"); // 39
     int nvar = NC_names.size();
     Vector<Vector<FArrayBox>> NC_fab_var;
     NC_fab_var.resize(num_boxes_at_level[lev]);
@@ -349,10 +355,14 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev)
                                use_theta_m, success);
 
             auto& var_fab_from_file = NC_fab_var[idx][ivar];
+            // NOTE: FRC_URB2D is optional static input. Almost no existing wrfinput
+            //       file carries it, and anything not listed here aborts on a failed
+            //       read, so it must stay in this disjunction.
             bool has_fallback_behavior =
                 (var_name == "U")      || (var_name == "V")      || (var_name == "W")      ||
                 (var_name == "THM")    || (var_name == "QVAPOR") || (var_name == "QCLOUD") ||
-                (var_name == "QRAIN")  || (var_name == "PH")     || (var_name == "PHB");
+                (var_name == "QRAIN")  || (var_name == "PH")     || (var_name == "PHB")    ||
+                (var_name == "FRC_URB2D");
             if (!success && !has_fallback_behavior) {
                 amrex::Abort(std::string("ERF::init_from_wrfinput: failed to read required variable " + var_name).c_str());
             }
@@ -852,6 +862,34 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev)
                   });
               }
               (soil_type_lev[lev])[0]->FillBoundary(geom[lev].periodicity());
+          }
+
+          // Initialize urban fraction
+          // NOTE: unlike the blocks above, FRC_URB2D has fallback behavior, so this
+          //       block can be reached with success == 0 and an unallocated var_fab.
+          if ( var_name == "FRC_URB2D" ) {
+              if (success) {
+                  for ( MFIter mfi(*(urb_frac_lev[lev][0]), TilingIfNotGPU()); mfi.isValid(); ++mfi ) {
+                      Box gtbx = mfi.growntilebox();
+                      const Array4<      Real>& dst_arr = urb_frac_lev[lev][0]->array(mfi);
+                      const Array4<const Real>& src_arr = var_fab.const_array();
+                      ParallelFor(gtbx, [=] AMREX_GPU_DEVICE (int i, int j, int) noexcept
+                      {
+                          int li = amrex::min(amrex::max(i, i_lo), i_hi);
+                          int lj = amrex::min(amrex::max(j, j_lo), j_hi);
+                          // An urban fraction is an area fraction; clamp so that a
+                          // fill value or a slightly out-of-range input cannot make
+                          // a tile blend weight negative or greater than one.
+                          dst_arr(i,j,0) = amrex::min(amrex::max(src_arr(li,lj,0), Real(0.0)), Real(1.0));
+                      });
+                  }
+              } else {
+                  // Leave whatever is already there: the zero default from
+                  // MakeNewLevelFromScratch, or a value read from an earlier input
+                  // file at this level.
+                  amrex::Print() << "FRC_URB2D is absent from this wrfinput; leaving the urban fraction unchanged" << std::endl;
+              }
+              (urb_frac_lev[lev])[0]->FillBoundary(geom[lev].periodicity());
           }
 
           // Initialize any LSM variables

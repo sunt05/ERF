@@ -210,6 +210,10 @@ public:
       }
       if (rough_land_string == "constant") {
           rough_type_land = RoughCalcType::CONSTANT;
+      } else if (rough_land_string == "lsm") {
+          // z_0 over land is refreshed each step from the LSM roughness field;
+          // make_SurfaceLayer_at_level aborts if no such field is registered.
+          rough_type_land = RoughCalcType::LSM;
       } else {
           amrex::Abort("Undefined MOST roughness type for land!");
       }
@@ -378,6 +382,16 @@ public:
               m_lsm_tsurf_indx = n;
               m_has_ocean_lsm_tsurf = (lc_name == "t_surf");
           }
+          if (lc_name == "znt") {
+              m_has_lsm_z0  = true;
+              m_lsm_z0_indx = n;
+          }
+      }
+      if (rough_type_land == RoughCalcType::LSM && !m_has_lsm_z0) {
+          amrex::Abort("erf.most.roughness_type_land = lsm requires a land "
+                       "surface model that registers a roughness length named "
+                       "'znt'; none was found. Use "
+                       "erf.most.roughness_type_land = constant instead.");
       }
       int n_valid_lsm_flux = 0;
       for (int n(0); n < nflux; ++n) {
@@ -582,6 +596,8 @@ public:
 
   void get_lsm_tsurf (const int& lev);
 
+  void get_lsm_z0 (const int& lev);
+
   /* wrapper around compute_pblh */
   void update_pblh (const int& lev,
                     amrex::Vector<amrex::Vector<amrex::MultiFab>>& vars,
@@ -709,7 +725,8 @@ public:
     CHARNOCK,
     MODIFIED_CHARNOCK,
     DONELAN,
-    WAVE_COUPLED
+    WAVE_COUPLED,
+    LSM           ///< z0 over land supplied per step by the land surface model
   };
 
   enum struct PBLHeightCalcType { None, MYNN25, YSU, MRF, YSUNew };
@@ -757,6 +774,8 @@ private:
   bool m_has_lsm_tsurf  = false;
   bool m_has_ocean_lsm_tsurf = false;
   int  m_lsm_tsurf_indx = -1;
+  bool m_has_lsm_z0     = false;
+  int  m_lsm_z0_indx    = -1;
 
   amrex::Real m_Cd = zero;
   amrex::Real m_Ch = zero;

@@ -156,11 +156,18 @@ with the flux type. Therefore, the MOST implementation in ERF is a specific meth
 
 MOST Inputs
 ~~~~~~~~~~~~~~~~~~~
-To evaluate the fluxes with MOST, the surface rougness parameter :math:`z_{0}` must be specified. This quantity may be considered a constant or may be parameterized through the friction velocity :math:`u_{\star}`. ERF supports four methods for parameterizing the surface roughness: ``constant``, ``charnock``, ``modified_charnock``, and ``wave_coupled``. The latter three methods parameterize :math:`z_{0} = f(u_{\star})` and are described in `Jimenez & Dudhia, American Meteorological Society, 2018 <https://doi.org/10.1175/JAMC-D-17-0137.1>`_ and `Warner et. al, Ocean Modelling, 2010 <https://doi.org/10.1016/j.ocemod.2010.07.010>`_. The rougness calculation method may be specified with
+To evaluate the fluxes with MOST, the surface rougness parameter :math:`z_{0}` must be specified. This quantity may be considered a constant, supplied per step by the land surface model, or parameterized through the friction velocity :math:`u_{\star}`. The roughness method is specified separately over land and over sea:
 
 ::
 
-   erf.most.roughness_type    = STRING    #Z_0 type (constant, charnock, modified_charnock, wave_couples)
+   erf.most.roughness_type_land = STRING  #Z_0 type over land (constant, lsm); default constant
+   erf.most.roughness_type_sea  = STRING  #Z_0 type over sea  (constant, charnock, modified_charnock, wave_coupled); default charnock
+
+The single combined ``erf.most.roughness_type`` is deprecated and ERF aborts if it appears in the inputs file.
+
+The ``charnock``, ``modified_charnock``, and ``wave_coupled`` methods parameterize :math:`z_{0} = f(u_{\star})` and are described in `Jimenez & Dudhia, American Meteorological Society, 2018 <https://doi.org/10.1175/JAMC-D-17-0137.1>`_ and `Warner et. al, Ocean Modelling, 2010 <https://doi.org/10.1016/j.ocemod.2010.07.010>`_.
+
+The ``lsm`` method refreshes :math:`z_{0}` over land at every surface-layer update from the roughness length computed by the active land surface model (the ``znt`` coupling field, currently supplied by Noah-MP). ERF aborts at level construction if ``lsm`` is requested but no land surface model registers a ``znt`` field. Cells whose land-surface roughness is missing, non-positive, or non-finite retain the value :math:`z_{0}` already held, so a provider gap does not inject an invalid roughness into :math:`\log(z_{ref}/z_{0})`. Water cells are unaffected and continue to use ``roughness_type_sea``.
 
 If the ``charnock`` method is employed, the :math:`a` constant may be specified with ``erf.most.charnock_constant`` (defaults to 0.0185). If the ``modified_charnock`` method is employed, the depth :math:`d` may be specified with ``erf.most.modified_charnock_depth`` (defaults to 30 m). If the ``wave_coupled`` method is employed, the user must provide wave height and mean wavelength data.
 

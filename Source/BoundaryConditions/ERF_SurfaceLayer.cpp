@@ -1,4 +1,5 @@
 #include "ERF_SurfaceLayer.H"
+#include "ERF_SurfaceLayerRoughness.H"
 #include "ERF_SurfaceLayerStress.H"
 
 using namespace amrex;
@@ -38,6 +39,14 @@ SurfaceLayer::update_fluxes (const int& lev,
     // Update land surface temp if we have a valid pointer
     if (m_has_lsm_tsurf) { get_lsm_tsurf(lev); }
 
+    // Update land surface roughness from the LSM if that is what was requested.
+    // get_lsm_z0 only copies the LSM valid box into its own ghost cells, so the
+    // interior/periodic ghosts still need to be filled here (as for t_surf).
+    if (rough_type_land == RoughCalcType::LSM) {
+        get_lsm_z0(lev);
+        z_0[lev].FillBoundary(m_geom[lev].periodicity());
+    }
+
     // Fill interior ghost cells
     t_surf[lev]->FillBoundary(m_geom[lev].periodicity());
 
@@ -49,8 +58,9 @@ SurfaceLayer::update_fluxes (const int& lev,
     //*******************************************************************************
     // ***************************************************************
     // Iterate the fluxes if moeng type
-    // First iterate over land -- the only model for surface roughness
-    // over land is RoughCalcType::CONSTANT
+    // First iterate over land -- the models for surface roughness over land
+    // are RoughCalcType::CONSTANT and RoughCalcType::LSM (the latter having
+    // already refreshed z_0 above, so the same flux functors apply)
     // ***************************************************************
     if (flux_type == FluxCalcType::MOENG ||
         flux_type == FluxCalcType::ROTATE) {
@@ -58,16 +68,22 @@ SurfaceLayer::update_fluxes (const int& lev,
         // Do we have a constant flux for moisture over land?
         bool cons_qflux = ( (moist_type == MoistCalcType::MOISTURE_FLUX) ||
                             (moist_type == MoistCalcType::ADIABATIC) );
+        // The land flux functors all read z_0 without modifying it, so LSM
+        // roughness (already staged into z_0 above) reuses them unchanged;
+        // only CONSTANT and LSM are supported over land.
+        const bool known_rough_type_land =
+            ( (rough_type_land == RoughCalcType::CONSTANT) ||
+              (rough_type_land == RoughCalcType::LSM) );
         if (m_terrain_type != TerrainType::EB) {
             if (theta_type == ThetaCalcType::HEAT_FLUX) {
-                if (rough_type_land == RoughCalcType::CONSTANT) {
+                if (known_rough_type_land) {
                     surface_flux most_flux(surf_temp_flux, surf_moist_flux, cons_qflux);
                     compute_fluxes(lev, max_iters, cons_in, most_flux, is_land);
                 } else {
                     amrex::Abort("Unknown value for rough_type_land");
                 }
             } else if (theta_type == ThetaCalcType::SURFACE_TEMPERATURE) {
-                if (rough_type_land == RoughCalcType::CONSTANT) {
+                if (known_rough_type_land) {
                     surface_temp most_flux(surf_temp_flux, surf_moist_flux, cons_qflux);
                     compute_fluxes(lev, max_iters, cons_in, most_flux, is_land);
                 } else {
@@ -75,7 +91,7 @@ SurfaceLayer::update_fluxes (const int& lev,
                 }
             } else if ((theta_type == ThetaCalcType::ADIABATIC) &&
                        (moist_type == MoistCalcType::ADIABATIC)) {
-                if (rough_type_land == RoughCalcType::CONSTANT) {
+                if (known_rough_type_land) {
                     adiabatic most_flux(surf_temp_flux, surf_moist_flux);
                     compute_fluxes(lev, max_iters, cons_in, most_flux, is_land);
                 } else {
@@ -87,14 +103,14 @@ SurfaceLayer::update_fluxes (const int& lev,
         // EB
         } else {
             if (theta_type == ThetaCalcType::HEAT_FLUX) {
-                if (rough_type_land == RoughCalcType::CONSTANT) {
+                if (known_rough_type_land) {
                     surface_flux_eb most_flux(surf_temp_flux, surf_moist_flux, cons_qflux);
                     compute_fluxes(lev, max_iters, cons_in, most_flux, is_land);
                 } else {
                     amrex::Abort("Unknown value for rough_type_land");
                 }
             } else if (theta_type == ThetaCalcType::SURFACE_TEMPERATURE) {
-                if (rough_type_land == RoughCalcType::CONSTANT) {
+                if (known_rough_type_land) {
                     surface_temp_eb most_flux(surf_temp_flux, surf_moist_flux, cons_qflux);
                     compute_fluxes(lev, max_iters, cons_in, most_flux, is_land);
                 } else {
@@ -102,7 +118,7 @@ SurfaceLayer::update_fluxes (const int& lev,
                 }
             } else if ((theta_type == ThetaCalcType::ADIABATIC) &&
                        (moist_type == MoistCalcType::ADIABATIC)) {
-                if (rough_type_land == RoughCalcType::CONSTANT) {
+                if (known_rough_type_land) {
                     adiabatic_eb most_flux(surf_temp_flux, surf_moist_flux);
                     compute_fluxes(lev, max_iters, cons_in, most_flux, is_land);
                 } else {
@@ -1244,6 +1260,44 @@ SurfaceLayer::get_lsm_tsurf (const int& lev)
                 int lj = amrex::min(amrex::max(j, j_lo), j_hi);
                 t_surf_arr(i,j,k) = lsm_arr(li,lj,k);
             }
+        });
+    }
+}
+
+void
+SurfaceLayer::get_lsm_z0 (const int& lev)
+{
+    AMREX_ALWAYS_ASSERT(m_has_lsm_z0 && m_lsm_z0_indx >= 0);
+    AMREX_ALWAYS_ASSERT(m_lsm_data_lev[lev][m_lsm_z0_indx] != nullptr);
+
+    const int klo = m_geom[lev].Domain().smallEnd(2);
+    const Real undefined = lsm_undefined;
+    for (MFIter mfi(z_0[lev]); mfi.isValid(); ++mfi)
+    {
+        Box gtbx = mfi.growntilebox();
+
+        if (gtbx.smallEnd(2) != klo) { continue; }
+
+        // NOTE: LSM does not carry lateral ghost cells.
+        //       This copies the valid box into the ghost cells.
+        //       Fillboundary is called after this to pick up the
+        //       interior ghost and periodic directions.
+        Box vbx  = mfi.validbox();
+        int i_lo = vbx.smallEnd(0); int i_hi = vbx.bigEnd(0);
+        int j_lo = vbx.smallEnd(1); int j_hi = vbx.bigEnd(1);
+
+        auto z0_arr    = z_0[lev].array(mfi);
+        auto lmask_arr = (m_lmask_lev[lev][0]) ? m_lmask_lev[lev][0]->array(mfi) :
+                                                 Array4<int> {};
+        const auto lsm_arr = m_lsm_data_lev[lev][m_lsm_z0_indx]->const_array(mfi);
+
+        ParallelFor(gtbx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept
+        {
+            const bool is_land = (lmask_arr) ? (lmask_arr(i,j,k) == 1) : true;
+            int li = amrex::min(amrex::max(i, i_lo), i_hi);
+            int lj = amrex::min(amrex::max(j, j_lo), j_hi);
+            z0_arr(i,j,k) = surface_layer_roughness::select_z0(
+                is_land, lsm_arr(li,lj,k), z0_arr(i,j,k), undefined);
         });
     }
 }

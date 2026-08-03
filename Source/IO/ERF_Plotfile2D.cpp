@@ -269,6 +269,30 @@ ERF::Write2DPlotFile (int which, PlotFileType plotfile_type, Vector<std::string>
             mf_comp++;
         }
 
+        // urb_frac follows landmask in the catalog, so it must be filled here.
+        // urb_frac_lev is allocated for every level in MakeNewLevelFromScratch,
+        // which is what makes this diagnostic AlwaysAvailable; the guard below only
+        // protects against a level whose 2D containers have not been built yet.
+        if (containerHasElement(plot_var_names, "urb_frac")) {
+            if (!urb_frac_lev[lev].empty() && urb_frac_lev[lev][0]) {
+#ifdef _OPENMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+                for ( MFIter mfi(mf[lev],TilingIfNotGPU()); mfi.isValid(); ++mfi)
+                {
+                    const Box& bx = mfi.tilebox();
+                    const Array4<Real>& derdat = mf[lev].array(mfi);
+                    const Array4<const Real>& urb_frac_arr = urb_frac_lev[lev][0]->const_array(mfi);
+                    ParallelFor(bx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
+                       derdat(i, j, k, mf_comp) = urb_frac_arr(i, j, 0);
+                    });
+                }
+            } else {
+                mf[lev].setVal(0.0,mf_comp,1,0);
+            }
+            mf_comp++;
+        }
+
         if (containerHasElement(plot_var_names, "mapfac")) {
 #ifdef _OPENMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())

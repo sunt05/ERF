@@ -31,11 +31,19 @@ USE_EAMXX_SHOC  ?= $(USE_SHOC)
 # Normalize feature dependencies before Make.defs and Make.package includes.
 # GNUmakefile remains the user-facing switchboard; this block only enforces
 # dependencies that are required by selected features. The overrides are
-# intentional so contradictory command-line settings such as
-# USE_NOAHMP=TRUE USE_RRTMGP=FALSE do not create an inconsistent build graph.
-ifeq ($(USE_NOAHMP), TRUE)
-  override USE_RRTMGP = TRUE
-endif
+# intentional so a contradictory command-line setting such as
+# USE_RRTMGP=TRUE USE_KOKKOS=FALSE does not create an inconsistent build graph.
+#
+# Deliberately absent: a "USE_NOAHMP => USE_RRTMGP" override. Exec/GNUmakefile
+# includes this file only inside `ifeq ($(USE_RRTMGP), TRUE)`, so that override
+# was unreachable for the one case it claimed to guard. `make USE_NOAHMP=TRUE`
+# without USE_RRTMGP takes GNUmakefile's else branch and includes Exec/Make.ERF,
+# which never sees this file; and when USE_RRTMGP=TRUE is already on the command
+# line the override is a no-op. Noah-MP requires only NetCDF: Exec/Make.ERF
+# raises $(error USE_NETCDF must be true for using NOAH-MP interface) and
+# CMakeLists.txt raises FATAL_ERROR "Noah-MP requires NetCDF be enabled" -- the
+# two build systems already agree, and the USE_NOAHMP block further down this
+# file adds nothing RRTMGP-related either.
 ifeq ($(USE_RRTMGP), TRUE)
   override USE_KOKKOS = TRUE
   override USE_NETCDF = TRUE

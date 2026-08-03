@@ -61,6 +61,11 @@ configuration and runtime details that cannot be inferred from metadata alone.
      - ``1``
      - ``AlwaysAvailable``
      - Land-sea mask
+   * - ``urb_frac``
+     - ``Geometry``
+     - ``1``
+     - ``AlwaysAvailable``
+     - Urban area fraction of the grid cell
    * - ``mapfac``
      - ``Geometry``
      - ``1``
@@ -401,7 +406,7 @@ The selection contract and the value written after selection are separate:
    * - Name or family
      - Selectable when
      - Runtime value
-   * - ``z_surf``, ``landmask``, ``mapfac``
+   * - ``z_surf``, ``landmask``, ``urb_frac``, ``mapfac``
      - Selectable: fixed geometry or state writer path.
      - Value: ERF writes the corresponding geometry or state value.
    * - ``lat_m``, ``lon_m``
