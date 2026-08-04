@@ -4,22 +4,31 @@ on:
   push:
     # branches: [development]
     paths-ignore:
-      - Docs
+      # See ci.yml: `Docs` alone never matched the directory.
+      - Docs/**
       - README.rst
       - license.txt
 
   pull_request:
     branches: [development]
 
+  workflow_dispatch:
+
 concurrency:
   group: ${{ github.ref }}-${{ github.head_ref }}-hip
   cancel-in-progress: true
 
 jobs:
+  # Feature-based routing: see .github/workflows/detect-changes.yml
+  changes:
+    uses: ./.github/workflows/detect-changes.yml
+
   # MPI_C is broken since HIP 4.1
   # https://gitlab.kitware.com/cmake/cmake/-/issues/21968
   # https://github.com/ROCm-Developer-Tools/HIP/issues/2246
   Build-And-Test-HIP:
+    needs: changes
+    if: needs.changes.outputs.run-gpu == 'true'
     name: HIP ROCm GFortran@9.3 C++17 - Mesh ${{matrix.mesh_precision}} Particles ${{matrix.particles}} ${{matrix.particles_precision}}
     runs-on: ubuntu-22.04
     # Have to have -Wno-deprecated-declarations due to deprecated atomicAddNoRet

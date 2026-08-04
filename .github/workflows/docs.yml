@@ -1,13 +1,22 @@
 name: DocHTML -- Build and Deploy
 
-on: [push, pull_request]
+on: [push, pull_request, workflow_dispatch]
 
 concurrency:
   group: ${{ github.ref }}-${{ github.head_ref }}-docs
   cancel-in-progress: true
 
 jobs:
+  # Feature-based routing: see .github/workflows/detect-changes.yml.
+  # BuildDocs.sh runs Doxygen over Source/, so a source change can change the
+  # rendered docs -- `run-docs` therefore also fires for core changes at
+  # integration time, not only for edits under Docs/.
+  changes:
+    uses: ./.github/workflows/detect-changes.yml
+
   build-and-deploy:
+    needs: changes
+    if: needs.changes.outputs.run-docs == 'true'
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout

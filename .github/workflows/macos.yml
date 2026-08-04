@@ -1,13 +1,19 @@
 name: MacOS
 
-on: [push, pull_request]
+on: [push, pull_request, workflow_dispatch]
 
 concurrency:
   group: ${{ github.ref }}-${{ github.head_ref }}-macos
   cancel-in-progress: true
 
 jobs:
+  # Feature-based routing: see .github/workflows/detect-changes.yml
+  changes:
+    uses: ./.github/workflows/detect-changes.yml
+
   MacOS-Clang:
+    needs: changes
+    if: needs.changes.outputs.run-macos == 'true'
     name: Apple Clang@11.0 - Mesh ${{matrix.mesh_precision}} Particles ${{matrix.particles}} ${{matrix.particles_precision}}
     runs-on: macos-latest
     # env: {CXXFLAGS: "-fno-operator-names -Werror -Wall -Wextra -Wpedantic -Wnull-dereference -Wfloat-conversion -Wshadow -Woverloaded-virtual"}

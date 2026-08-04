@@ -1,13 +1,21 @@
 name: Linux GCC
 
-on: [push, pull_request]
+on: [push, pull_request, workflow_dispatch]
 
 concurrency:
   group: ${{ github.ref }}-${{ github.head_ref }}-linux-gcc
   cancel-in-progress: true
 
 jobs:
+  # Feature-based routing: see .github/workflows/detect-changes.yml
+  changes:
+    uses: ./.github/workflows/detect-changes.yml
+
   library:
+    # Feature tier: this is the baseline compile, so it runs on every push that
+    # touches code -- it is the fast signal a branch is not broken.
+    needs: changes
+    if: needs.changes.outputs.run-gcc == 'true'
     name: GNU@9.3 C++17 Release - Mesh ${{matrix.mesh_precision}} Particles ${{matrix.particles}} ${{matrix.particles_precision}}
     runs-on: ubuntu-22.04
     # env: {CXXFLAGS: "-fno-operator-names -Werror -Wall -Wextra -Wpedantic -Wnull-dereference -Wfloat-conversion -Wshadow -Woverloaded-virtual"}

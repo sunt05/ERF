@@ -4,19 +4,28 @@ on:
   push:
     # branches: [development]
     paths-ignore:
-      - Docs
+      # See ci.yml: `Docs` alone never matched the directory.
+      - Docs/**
       - README.rst
       - license.txt
 
   pull_request:
     branches: [development]
 
+  workflow_dispatch:
+
 concurrency:
   group: ${{ github.ref }}-${{ github.head_ref }}-sycl
   cancel-in-progress: true
 
 jobs:
+  # Feature-based routing: see .github/workflows/detect-changes.yml
+  changes:
+    uses: ./.github/workflows/detect-changes.yml
+
   Build-And-Test-SYCL:
+    needs: changes
+    if: needs.changes.outputs.run-gpu == 'true'
     name: oneAPI SYCL - Mesh ${{matrix.mesh_precision}} Particles ${{matrix.particles}} ${{matrix.particles_precision}}
     runs-on: ubuntu-24.04
     strategy:

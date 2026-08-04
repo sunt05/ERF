@@ -1,0 +1,390 @@
+name: Detect changes
+
+# Feature-based CI routing for ERF.
+#
+# Before this existed, every workflow fired on every push: a one-line edit to a
+# design note under Source/LandSurfaceModel/Noah-MP/dev/ launched the full CUDA,
+# HIP, SYCL, Windows, Windows-MPI, macOS and Linux matrices. This workflow is
+# the one place that decides what a given change actually needs.
+#
+# It is a reusable workflow. Each heavy workflow gains two lines:
+#
+#   jobs:
+#     changes:
+#       uses: ./.github/workflows/detect-changes.yml
+#     <existing-job>:
+#       needs: changes
+#       if: needs.changes.outputs.run-<area> == 'true'
+#
+# so the routing policy lives here rather than being copied into a dozen files.
+# Path categories live in .github/path-filters.yml.
+#
+# Two tiers:
+#
+#   Feature tier  -- every push. Cheap lint plus the baseline Linux GCC build
+#                    plus whichever feature workflow matches the paths touched.
+#   Integration   -- pull requests, pushes to the default branch, and manual
+#                    dispatch. The full portability matrix: GPU backends,
+#                    Windows, macOS, the ERF CI matrix.
+#
+# Any workflow can still be forced from the Actions tab: a manual dispatch is
+# treated as integration, so `run-*` comes back true for anything with code
+# changes on the branch.
+#
+# Test the routing locally, without pushing, via:  scripts/ci/test-detect-changes.sh
+
+on:
+  workflow_call:
+    inputs:
+      base:
+        description: 'Override the ref/SHA to diff against. Empty = auto.'
+        required: false
+        type: string
+        default: ''
+    outputs:
+      # Per-workflow decisions. Prefer these over the raw categories below:
+      # they keep the policy in this file instead of in every caller's `if:`.
+      run-lint:
+        description: 'Style / formatting checks'
+        value: ${{ jobs.detect.outputs.run-lint }}
+      run-gcc:
+        description: 'Baseline Linux GCC build (feature tier -- runs on every push)'
+        value: ${{ jobs.detect.outputs.run-gcc }}
+      run-noahmp:
+        description: 'Noah-MP / SLUCM NetCDF build'
+        value: ${{ jobs.detect.outputs.run-noahmp }}
+      run-rrtmgp:
+        description: 'RRTMGP radiation build'
+        value: ${{ jobs.detect.outputs.run-rrtmgp }}
+      run-erf-ci:
+        description: 'ERF CI matrix (integration tier)'
+        value: ${{ jobs.detect.outputs.run-erf-ci }}
+      run-gpu:
+        description: 'CUDA / HIP / SYCL builds (integration tier)'
+        value: ${{ jobs.detect.outputs.run-gpu }}
+      run-windows:
+        description: 'Windows and Windows-MPI builds (integration tier)'
+        value: ${{ jobs.detect.outputs.run-windows }}
+      run-macos:
+        description: 'macOS build (integration tier)'
+        value: ${{ jobs.detect.outputs.run-macos }}
+      run-docs:
+        description: 'Sphinx documentation build'
+        value: ${{ jobs.detect.outputs.run-docs }}
+
+      # Raw categories, for a caller that genuinely needs to compose its own
+      # condition. Adding a new policy here is preferred to composing in-place.
+      core:
+        description: 'ERF solver sources changed'
+        value: ${{ jobs.detect.outputs.core }}
+      noahmp:
+        description: 'Noah-MP / SLUCM sources changed'
+        value: ${{ jobs.detect.outputs.noahmp }}
+      rrtmgp:
+        description: 'RRTMGP sources changed'
+        value: ${{ jobs.detect.outputs.rrtmgp }}
+      build:
+        description: 'Build system changed'
+        value: ${{ jobs.detect.outputs.build }}
+      submodules:
+        description: 'Submodule pointers changed'
+        value: ${{ jobs.detect.outputs.submodules }}
+      docs:
+        description: 'Prose changed'
+        value: ${{ jobs.detect.outputs.docs }}
+      docs-only:
+        description: 'Nothing but prose changed'
+        value: ${{ jobs.detect.outputs.docs-only }}
+      integration:
+        description: 'This event is an integration-tier event'
+        value: ${{ jobs.detect.outputs.integration }}
+
+  workflow_dispatch:
+    inputs:
+      base:
+        description: 'Base ref/SHA to compare HEAD against'
+        required: true
+        default: 'origin/development'
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    name: Detect changed areas
+    runs-on: ubuntu-22.04
+    outputs:
+      run-lint: ${{ steps.decide.outputs.run-lint }}
+      run-gcc: ${{ steps.decide.outputs.run-gcc }}
+      run-noahmp: ${{ steps.decide.outputs.run-noahmp }}
+      run-rrtmgp: ${{ steps.decide.outputs.run-rrtmgp }}
+      run-erf-ci: ${{ steps.decide.outputs.run-erf-ci }}
+      run-gpu: ${{ steps.decide.outputs.run-gpu }}
+      run-windows: ${{ steps.decide.outputs.run-windows }}
+      run-macos: ${{ steps.decide.outputs.run-macos }}
+      run-docs: ${{ steps.decide.outputs.run-docs }}
+      docs-only: ${{ steps.decide.outputs.docs-only }}
+      integration: ${{ steps.decide.outputs.integration }}
+      core: ${{ steps.filter.outputs.core }}
+      noahmp: ${{ steps.filter.outputs.noahmp }}
+      lsm: ${{ steps.filter.outputs.lsm }}
+      rrtmgp: ${{ steps.filter.outputs.rrtmgp }}
+      build: ${{ steps.filter.outputs.build }}
+      submodules: ${{ steps.filter.outputs.submodules }}
+      tests: ${{ steps.filter.outputs.tests }}
+      exec: ${{ steps.filter.outputs.exec }}
+      docs: ${{ steps.filter.outputs.docs }}
+      paper: ${{ steps.filter.outputs.paper }}
+      ci: ${{ steps.filter.outputs.ci }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history: a push to a feature branch is compared against its
+          # merge base with the default branch, which a shallow clone cannot
+          # find.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve comparison base
+        id: base
+        env:
+          INPUT_BASE: ${{ inputs.base }}
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          BEFORE: ${{ github.event.before }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'development' }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "${INPUT_BASE}" ]; then
+            # Explicit override: the local `act` harness, or a caller that
+            # wants to diff against something specific.
+            BASE="${INPUT_BASE}"
+
+          elif [ "${EVENT}" = "pull_request" ] || [ "${EVENT}" = "pull_request_target" ]; then
+            # Leave empty: dorny/paths-filter resolves the PR's base branch
+            # itself, which is more reliable than reconstructing it here.
+            BASE=""
+
+          elif [ "${REF_NAME}" = "${DEFAULT_BRANCH}" ]; then
+            # On the default branch there is no merge base to speak of, so
+            # compare against what the branch pointed at before this push.
+            if [ -n "${BEFORE}" ] \
+               && [ "${BEFORE}" != "0000000000000000000000000000000000000000" ] \
+               && git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+              BASE="${BEFORE}"
+            else
+              BASE="HEAD~1"
+            fi
+
+          else
+            # Feature branch: route on what the WHOLE branch changes relative to
+            # the default branch, not just the last commit. Comparing against
+            # the previous commit would let a docs-only follow-up push skip the
+            # build while `cancel-in-progress` had already killed the run that
+            # would have covered the source changes -- leaving the branch with
+            # no green build at all.
+            if BASE="$(git merge-base HEAD "origin/${DEFAULT_BRANCH}" 2>/dev/null)"; then
+              :
+            else
+              # Conservative fallback: diff against the branch itself, which
+              # over-triggers rather than under-triggers.
+              echo "::warning::could not find a merge base with origin/${DEFAULT_BRANCH}; falling back to a branch diff"
+              BASE="origin/${DEFAULT_BRANCH}"
+            fi
+          fi
+
+          echo "base=${BASE}" >> "$GITHUB_OUTPUT"
+          echo "Comparing against: ${BASE:-<pull request base>}"
+
+      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3
+        id: filter
+        with:
+          base: ${{ steps.base.outputs.base }}
+          filters: .github/path-filters.yml
+          list-files: csv
+
+      - name: Decide what to run
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'development' }}
+          INPUT_BASE: ${{ inputs.base }}
+          CORE: ${{ steps.filter.outputs.core }}
+          NOAHMP: ${{ steps.filter.outputs.noahmp }}
+          LSM: ${{ steps.filter.outputs.lsm }}
+          RRTMGP: ${{ steps.filter.outputs.rrtmgp }}
+          BUILD: ${{ steps.filter.outputs.build }}
+          SUBMODULES: ${{ steps.filter.outputs.submodules }}
+          TESTS: ${{ steps.filter.outputs.tests }}
+          EXEC: ${{ steps.filter.outputs.exec }}
+          DOCS: ${{ steps.filter.outputs.docs }}
+          CI: ${{ steps.filter.outputs.ci }}
+        run: |
+          set -euo pipefail
+
+          any() { for v in "$@"; do [ "$v" = "true" ] && { echo true; return; }; done; echo false; }
+
+          # Integration tier: anything that is about to be merged, or that a
+          # human explicitly asked for.
+          INTEGRATION=false
+          if [ "${EVENT}" = "pull_request" ] \
+             || [ "${EVENT}" = "pull_request_target" ] \
+             || [ "${EVENT}" = "merge_group" ] \
+             || [ "${EVENT}" = "workflow_dispatch" ] \
+             || [ "${EVENT}" = "schedule" ] \
+             || [ "${REF_NAME}" = "${DEFAULT_BRANCH}" ]; then
+            INTEGRATION=true
+          fi
+
+          # Does anything compiled change? A CI edit counts: otherwise a broken
+          # workflow only surfaces on the next unrelated source change.
+          CODE=$(any "$CORE" "$BUILD" "$SUBMODULES" "$TESTS" "$EXEC" "$CI")
+
+          # A human pressing "Run workflow" wants that workflow to run, full
+          # stop -- not to be told the diff looked uninteresting. On the default
+          # branch there is no merge base to diff against either, so without
+          # this a dispatch there would silently compare against HEAD~1 and skip.
+          #
+          # A non-empty INPUT_BASE means detect-changes was dispatched directly
+          # with a base to compare (the scripts/ci/test-detect-changes.sh
+          # harness), which DOES want real routing -- so only force when a
+          # caller workflow was dispatched, passing no base.
+          FORCE=false
+          if [ "${EVENT}" = "workflow_dispatch" ] && [ -z "${INPUT_BASE}" ]; then
+            FORCE=true
+            CODE=true
+          fi
+
+          DOCS_ONLY=false
+          if [ "${DOCS}" = "true" ] && [ "${CODE}" = "false" ]; then
+            DOCS_ONLY=true
+          fi
+
+          gate() { # gate <integration-required> <condition>
+            if [ "$1" = "true" ] && [ "${INTEGRATION}" != "true" ]; then echo false; else echo "$2"; fi
+          }
+
+          # -- Feature tier: runs on every push that touches code -------------
+          RUN_LINT="${CODE}"
+          RUN_GCC="${CODE}"
+
+          # Feature workflows run whenever their own area moves, and also at
+          # integration time for any code change, because a core solver edit can
+          # break a feature build without touching the feature's own files.
+          RUN_NOAHMP=$(any "$NOAHMP" "$LSM" "$BUILD" "$SUBMODULES" "$CI")
+          if [ "${INTEGRATION}" = "true" ] && [ "${CODE}" = "true" ]; then RUN_NOAHMP=true; fi
+
+          RUN_RRTMGP=$(any "$RRTMGP" "$BUILD" "$SUBMODULES" "$CI")
+          if [ "${INTEGRATION}" = "true" ] && [ "${CODE}" = "true" ]; then RUN_RRTMGP=true; fi
+
+          # -- Integration tier: the expensive portability matrix -------------
+          RUN_ERF_CI=$(gate true "${CODE}")
+          RUN_GPU=$(gate true "${CODE}")
+          RUN_WINDOWS=$(gate true "${CODE}")
+          RUN_MACOS=$(gate true "${CODE}")
+
+          # -- Docs -----------------------------------------------------------
+          # Docs/BuildDocs.sh runs Doxygen over Source/, so a source change can
+          # change the rendered output -- but only rebuild for that at
+          # integration time, not on every feature-branch push.
+          RUN_DOCS=$(any "$DOCS" "$CI" "$FORCE")
+          if [ "${INTEGRATION}" = "true" ] && [ "${CORE}" = "true" ]; then RUN_DOCS=true; fi
+
+          {
+            echo "integration=${INTEGRATION}"
+            echo "docs-only=${DOCS_ONLY}"
+            echo "run-lint=${RUN_LINT}"
+            echo "run-gcc=${RUN_GCC}"
+            echo "run-noahmp=${RUN_NOAHMP}"
+            echo "run-rrtmgp=${RUN_RRTMGP}"
+            echo "run-erf-ci=${RUN_ERF_CI}"
+            echo "run-gpu=${RUN_GPU}"
+            echo "run-windows=${RUN_WINDOWS}"
+            echo "run-macos=${RUN_MACOS}"
+            echo "run-docs=${RUN_DOCS}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Routing summary
+        env:
+          BASE: ${{ steps.base.outputs.base }}
+          EVENT: ${{ github.event_name }}
+          INTEGRATION: ${{ steps.decide.outputs.integration }}
+          DOCS_ONLY: ${{ steps.decide.outputs.docs-only }}
+          CORE: ${{ steps.filter.outputs.core }}
+          NOAHMP: ${{ steps.filter.outputs.noahmp }}
+          LSM: ${{ steps.filter.outputs.lsm }}
+          RRTMGP: ${{ steps.filter.outputs.rrtmgp }}
+          BUILD: ${{ steps.filter.outputs.build }}
+          SUBMODULES: ${{ steps.filter.outputs.submodules }}
+          TESTS: ${{ steps.filter.outputs.tests }}
+          EXEC: ${{ steps.filter.outputs.exec }}
+          DOCS: ${{ steps.filter.outputs.docs }}
+          PAPER: ${{ steps.filter.outputs.paper }}
+          CI: ${{ steps.filter.outputs.ci }}
+          CORE_FILES: ${{ steps.filter.outputs.core_files }}
+          NOAHMP_FILES: ${{ steps.filter.outputs.noahmp_files }}
+          RUN_LINT: ${{ steps.decide.outputs.run-lint }}
+          RUN_GCC: ${{ steps.decide.outputs.run-gcc }}
+          RUN_NOAHMP: ${{ steps.decide.outputs.run-noahmp }}
+          RUN_RRTMGP: ${{ steps.decide.outputs.run-rrtmgp }}
+          RUN_ERF_CI: ${{ steps.decide.outputs.run-erf-ci }}
+          RUN_GPU: ${{ steps.decide.outputs.run-gpu }}
+          RUN_WINDOWS: ${{ steps.decide.outputs.run-windows }}
+          RUN_MACOS: ${{ steps.decide.outputs.run-macos }}
+          RUN_DOCS: ${{ steps.decide.outputs.run-docs }}
+        run: |
+          mark() { if [ "$1" = "true" ]; then echo "run"; else echo "skip"; fi; }
+
+          {
+            echo "## CI routing"
+            echo ""
+            echo "- event: \`${EVENT}\`"
+            echo "- compared against: \`${BASE:-pull request base}\`"
+            echo "- tier: **$([ "${INTEGRATION}" = "true" ] && echo integration || echo feature)**"
+            echo "- docs-only change: \`${DOCS_ONLY}\`"
+            echo ""
+            echo "### Areas touched"
+            echo ""
+            echo "- core: \`${CORE}\`"
+            echo "- noahmp: \`${NOAHMP}\` (lsm: \`${LSM}\`)"
+            echo "- rrtmgp: \`${RRTMGP}\`"
+            echo "- build: \`${BUILD}\`  submodules: \`${SUBMODULES}\`"
+            echo "- tests: \`${TESTS}\`  exec: \`${EXEC}\`"
+            echo "- docs: \`${DOCS}\`  paper: \`${PAPER}\`  ci: \`${CI}\`"
+            echo ""
+            echo "### Decisions"
+            echo ""
+            echo "- Style: **$(mark "${RUN_LINT}")**"
+            echo "- Linux GCC: **$(mark "${RUN_GCC}")**"
+            echo "- Noah-MP: **$(mark "${RUN_NOAHMP}")**"
+            echo "- RRTMGP: **$(mark "${RUN_RRTMGP}")**"
+            echo "- ERF CI matrix: **$(mark "${RUN_ERF_CI}")**"
+            echo "- CUDA / HIP / SYCL: **$(mark "${RUN_GPU}")**"
+            echo "- Windows: **$(mark "${RUN_WINDOWS}")**"
+            echo "- macOS: **$(mark "${RUN_MACOS}")**"
+            echo "- Docs: **$(mark "${RUN_DOCS}")**"
+            if [ -n "${CORE_FILES}" ]; then
+              echo ""
+              echo "<details><summary>core files</summary>"
+              echo ""
+              echo "\`\`\`"
+              echo "${CORE_FILES}" | tr ',' '\n'
+              echo "\`\`\`"
+              echo ""
+              echo "</details>"
+            fi
+            if [ -n "${NOAHMP_FILES}" ]; then
+              echo ""
+              echo "<details><summary>noahmp files</summary>"
+              echo ""
+              echo "\`\`\`"
+              echo "${NOAHMP_FILES}" | tr ',' '\n'
+              echo "\`\`\`"
+              echo ""
+              echo "</details>"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          cat "$GITHUB_STEP_SUMMARY"
