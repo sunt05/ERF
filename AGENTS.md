@@ -2,6 +2,12 @@
 
 These instructions apply to the entire ERF repository checkout.
 
+## Fork identity and experimental scope
+
+- This repository is Ting Sun's personal experimental fork of ERF. It is a workspace for exploratory model development, urban-climate experiments, HPC testing, and other fork-specific work.
+- This fork is not the official `erf-model/ERF` repository. Work, branches, pull requests, results, and documentation in this fork must not be presented as official ERF changes or as having upstream approval or endorsement.
+- Unless Ting explicitly decides otherwise, experimental changes are intended to remain in this fork. Possible upstream contribution is a separate decision and requires explicit authorization.
+
 ## Repository and contribution destination
 
 - Treat `https://github.com/sunt05/ERF.git` (`origin`) as the default repository for all branches, pushes, pull requests, issues, comments, reviews, and other GitHub write operations.
