@@ -2,7 +2,10 @@ name: ERF CI
 
 on:
   push:
-    # branches: [development]
+    # Integration tier only: on a feature branch this workflow can never run
+    # (see detect-changes.yml), so firing it there spawns a routing job just to
+    # compute a foregone "skip". Upstream had this line ready but commented.
+    branches: [development]
     paths-ignore:
       # `Docs` on its own only matches a FILE named Docs, so the directory was
       # never actually ignored; `Docs/**` is what was meant. Finer-grained

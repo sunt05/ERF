@@ -2,7 +2,10 @@ name: ERF CI (cuda)
 
 on:
   push:
-    # branches: [development]
+    # Integration tier only: on a feature branch this workflow can never run
+    # (see detect-changes.yml), so firing it there spawns a routing job just to
+    # compute a foregone "skip". Upstream had this line ready but commented.
+    branches: [development]
     paths-ignore:
       # See ci.yml: `Docs` alone never matched the directory.
       - Docs/**

@@ -37,7 +37,8 @@
 #   tests       -- unit, regression and gold-file test infrastructure
 #   exec        -- Exec/ problem setups and their build glue
 #   docs        -- prose: Sphinx docs, design notes, READMEs, JOSS paper
-#   paper       -- JOSS paper sources only (draft-pdf.yml)
+#                  (the JOSS paper build is filtered natively in draft-pdf.yml,
+#                  so it needs no category of its own here)
 #   ci          -- workflows and CI tooling; forces a full re-validation
 
 core:
@@ -117,10 +118,6 @@ docs:
   - 'CITATION.cff'
   - 'LICENSE.md'
   - 'copyright.txt'
-
-paper:
-  # Narrower than `docs`: only the JOSS paper build cares about these.
-  - 'paper/**'
 
 ci:
   # A CI change re-validates everything -- otherwise a broken workflow edit

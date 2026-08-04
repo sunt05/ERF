@@ -1,6 +1,13 @@
 name: MacOS
 
-on: [push, pull_request, workflow_dispatch]
+on:
+  push:
+    # Integration tier only: on a feature branch this workflow can never run
+    # (see detect-changes.yml), so firing it there spawns a routing job just to
+    # compute a foregone "skip".
+    branches: [development]
+  pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.ref }}-${{ github.head_ref }}-macos

@@ -112,11 +112,15 @@ jobs:
           fetch-depth: 0
           # ...but not the file contents of that history. Routing needs commits
           # and trees (merge-base, then a name-only diff); it never reads a
-          # historical blob. Without this, all 13 gated workflows each clone
-          # ~5000 commits' worth of blobs on every event just to decide whether
-          # to do anything -- the exact waste this whole change exists to stop.
-          # Blobs for the checked-out HEAD are still fetched lazily on demand.
+          # historical blob. Measured on this repo: the pack is 320 MB, of which
+          # blobs are 313.8 MB and commits+trees only 5.7 MB.
           filter: blob:none
+          # And do not materialise the working tree either. Only
+          # .github/path-filters.yml is ever read here, but a full checkout is
+          # 511 MB -- 430 MB of it Tests/ERFGoldFiles -- fetched to decide
+          # whether to do nothing. Cloning that in every gated workflow on every
+          # event is the exact waste this whole change exists to stop.
+          sparse-checkout: .github
           persist-credentials: false
 
       - name: Resolve comparison base
@@ -176,7 +180,11 @@ jobs:
         with:
           base: ${{ steps.base.outputs.base }}
           filters: .github/path-filters.yml
-          list-files: csv
+          # No `list-files`. It emits a <category>_files output for EVERY
+          # category, and GITHUB_OUTPUT has a 1 MB cap -- a diff that touches
+          # Tests/ERFGoldFiles (430 MB, thousands of files) would blow it and
+          # fail routing outright. The per-category booleans below are the
+          # diagnostic that matters; `gh pr diff --name-only` gives the rest.
 
       - name: Decide what to run
         id: decide
@@ -241,7 +249,11 @@ jobs:
           }
 
           # -- Feature tier: runs on every push that touches code -------------
-          RUN_LINT="${CODE}"
+          # Style is NOT code-only: .github/workflows/style/check_tabs.sh globs
+          # *.md and *.rst, and check_trailing_whitespaces.sh globs *.rst and
+          # *.txt. Gating it on CODE alone would let a tab in a Docs/*.rst
+          # through untouched.
+          RUN_LINT=$(any "$CODE" "$DOCS")
           RUN_GCC="${CODE}"
 
           # Feature workflows run whenever their own area moves, and also at
@@ -295,10 +307,7 @@ jobs:
           TESTS: ${{ steps.filter.outputs.tests }}
           EXEC: ${{ steps.filter.outputs.exec }}
           DOCS: ${{ steps.filter.outputs.docs }}
-          PAPER: ${{ steps.filter.outputs.paper }}
           CI: ${{ steps.filter.outputs.ci }}
-          CORE_FILES: ${{ steps.filter.outputs.core_files }}
-          NOAHMP_FILES: ${{ steps.filter.outputs.noahmp_files }}
           RUN_LINT: ${{ steps.decide.outputs.run-lint }}
           RUN_GCC: ${{ steps.decide.outputs.run-gcc }}
           RUN_NOAHMP: ${{ steps.decide.outputs.run-noahmp }}
@@ -326,7 +335,7 @@ jobs:
             echo "- rrtmgp: \`${RRTMGP}\`"
             echo "- build: \`${BUILD}\`  submodules: \`${SUBMODULES}\`"
             echo "- tests: \`${TESTS}\`  exec: \`${EXEC}\`"
-            echo "- docs: \`${DOCS}\`  paper: \`${PAPER}\`  ci: \`${CI}\`"
+            echo "- docs: \`${DOCS}\`  ci: \`${CI}\`"
             echo ""
             echo "### Decisions"
             echo ""
@@ -339,26 +348,6 @@ jobs:
             echo "- Windows: **$(mark "${RUN_WINDOWS}")**"
             echo "- macOS: **$(mark "${RUN_MACOS}")**"
             echo "- Docs: **$(mark "${RUN_DOCS}")**"
-            if [ -n "${CORE_FILES}" ]; then
-              echo ""
-              echo "<details><summary>core files</summary>"
-              echo ""
-              echo "\`\`\`"
-              echo "${CORE_FILES}" | tr ',' '\n'
-              echo "\`\`\`"
-              echo ""
-              echo "</details>"
-            fi
-            if [ -n "${NOAHMP_FILES}" ]; then
-              echo ""
-              echo "<details><summary>noahmp files</summary>"
-              echo ""
-              echo "\`\`\`"
-              echo "${NOAHMP_FILES}" | tr ',' '\n'
-              echo "\`\`\`"
-              echo ""
-              echo "</details>"
-            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
           cat "$GITHUB_STEP_SUMMARY"

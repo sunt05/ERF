@@ -39,6 +39,26 @@ drift. A new routing need gets a new `run-*` output. The raw categories remain
 visible in each run's routing summary, which is where you want them when you are
 working out *why* something was skipped.
 
+## Which gate to reach for
+
+Three altitudes, cheapest first. Use the cheapest one that can express the rule:
+
+- **`on: push: branches:`** — for a workflow that is integration-tier only. It
+  can never run on a feature branch, so let GitHub skip it before a runner
+  starts rather than paying for a routing job to compute a foregone "skip".
+  This is why `ci`, `cuda-ci`, `hip`, `sycl`, `windows`, `windows-mpi` and
+  `macos` only take pushes to `development`. Pull requests and manual dispatch
+  are unaffected.
+- **`on: push: paths:`** — for a single-purpose workflow whose trigger is one
+  directory. `draft-pdf.yml` is the only one: nothing but `paper/` can change
+  that PDF. Again, no runner starts.
+- **the `changes` job** — for everything else, where the decision genuinely
+  depends on *which* code moved and the answer differs per event.
+
+The rule of thumb: if a workflow's answer is knowable from the branch or the
+path alone, GitHub should decide it for free. Reserve the routing job for
+questions that need the diff.
+
 ## Two tiers
 
 **Feature tier** — every push. Style checks, the baseline Linux GCC build, and
