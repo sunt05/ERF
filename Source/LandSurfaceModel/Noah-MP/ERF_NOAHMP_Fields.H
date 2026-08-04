@@ -22,7 +22,9 @@
     X(noahmp_temperature_2m_bare)                                            \
     X(noahmp_water_vapor_mixing_ratio_2m_vegetated)                           \
     X(noahmp_water_vapor_mixing_ratio_2m_bare)                                \
-    X(noahmp_vegetation_fraction)
+    X(noahmp_vegetation_fraction)                                             \
+    /* surface roughness handed to the surface layer (MOST z0 over land) */   \
+    X(znt)
 
 // Forcing ERF -> Noah-MP, mechanical 1:1 copies: X( ERF comp, NoahmpIO member ).
 // 3D members use the k/j transpose MEMBER(i,1,j); 2D use MEMBER(i,j).
@@ -64,7 +66,8 @@
     X(    o_noahmp_t2m_bare, T2MBXY )                                         \
     X(    o_noahmp_q2m_veg,  Q2MVXY )                                         \
     X(    o_noahmp_q2m_bare, Q2MBXY )                                         \
-    X(    o_noahmp_fveg,     FVEGXY )
+    X(    o_noahmp_fveg,     FVEGXY )                                         \
+    X(    o_znt,        ZNT       )
 
 #define NOAHMP_OUTPUT_2D_FIELDS(X) NOAHMP_OUTPUT_2D_FIELDS_HEAD(X)            \
                                    NOAHMP_OUTPUT_2D_FIELDS_TAIL(X)
@@ -90,7 +93,8 @@
     X(   T2MBXY_o,         noahmp_temperature_2m_bare,      o_noahmp_t2m_bare) \
     X(   Q2MVXY_o,         noahmp_water_vapor_mixing_ratio_2m_vegetated, o_noahmp_q2m_veg ) \
     X(   Q2MBXY_o,         noahmp_water_vapor_mixing_ratio_2m_bare,      o_noahmp_q2m_bare) \
-    X(   FVEGXY_o,         noahmp_vegetation_fraction, o_noahmp_fveg       )
+    X(   FVEGXY_o,         noahmp_vegetation_fraction, o_noahmp_fveg       ) \
+    X(   ZNT_o,            znt,               o_znt         )
 
 // ---------------------------------------------------------------------------
 //  Reusable field emitters -- the per-row action applied when a registry is

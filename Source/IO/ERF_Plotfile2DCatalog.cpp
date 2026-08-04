@@ -22,6 +22,7 @@ const amrex::Vector<DiagnosticDescriptor>& catalog_storage ()
     static const amrex::Vector<DiagnosticDescriptor> catalog{
         {DiagnosticID::ZSurf,         "z_surf",       "Surface elevation",                               "m",         DiagnosticCategory::Geometry,       MissingPolicy::AlwaysAvailable},
         {DiagnosticID::LandMask,       "landmask",     "Land-sea mask",                                   "1",         DiagnosticCategory::Geometry,       MissingPolicy::AlwaysAvailable},
+        {DiagnosticID::UrbFrac,        "urb_frac",     "Urban area fraction of the grid cell",            "1",         DiagnosticCategory::Geometry,       MissingPolicy::AlwaysAvailable},
         {DiagnosticID::MapFac,         "mapfac",       "Map factor at mass points",                       "1",         DiagnosticCategory::Geometry,       MissingPolicy::AlwaysAvailable},
         {DiagnosticID::LatM,           "lat_m",        "Latitude at unstaggered mass points",             "deg",       DiagnosticCategory::Geometry,       MissingPolicy::FillZeroWhenUnavailable},
         {DiagnosticID::LonM,           "lon_m",        "Longitude at unstaggered mass points",            "deg",       DiagnosticCategory::Geometry,       MissingPolicy::FillZeroWhenUnavailable},

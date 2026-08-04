@@ -62,6 +62,10 @@ erf.rotational_time_period = 86164.0900027328
 
 # RADIATION INPUTS
 erf.radiation_model        = "RRTMGP"
+# Radiation::Radiation does pp.get("rad_t_sfc"), not pp.query, so the run
+# aborts at construction without it even though Noah-MP overwrites it
+# immediately.
+erf.rad_t_sfc              = 300.0
 erf.rad.datalog            = "radiation"
 erf.profile_rad_int        = 100
 erf.rad_freq_in_steps      = 100

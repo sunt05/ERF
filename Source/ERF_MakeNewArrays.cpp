@@ -500,7 +500,10 @@ ERF::init_stuff (int lev, const BoxArray& ba, const DistributionMapping& dm,
 
     urb_frac_lev[lev].resize(1);
     urb_frac_lev[lev][0] = std::make_unique<MultiFab>(ba2d[lev],dm,1,ngv);
-    urb_frac_lev[lev][0]->setVal(one);
+    // Default to no urban fraction. This is a tile blend weight: 1.0 would declare
+    // every cell in the domain fully urban, which is wrong for any run that does not
+    // supply FRC_URB2D.
+    urb_frac_lev[lev][0]->setVal(zero);
     urb_frac_lev[lev][0]->FillBoundary(geom[lev].periodicity());
     }
 

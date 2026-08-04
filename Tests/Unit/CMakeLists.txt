@@ -113,6 +113,10 @@ target_sources(${erf_exe_name}
     ${CMAKE_CURRENT_SOURCE_DIR}/ERF_GTestRuntimeStubs.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/BoundaryConditions/ERF_GTestSurfaceDiagnosticSource.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/BoundaryConditions/ERF_GTestSurfaceLayerStress.cpp
+    # Motivation: roughness_type_land = lsm must accept a usable land-surface
+    # roughness and reject the undefined sentinel, zero, and non-finite values
+    # that would make log(zref/z0) infinite in the MOST stress kernel.
+    ${CMAKE_CURRENT_SOURCE_DIR}/BoundaryConditions/ERF_GTestSurfaceLayerRoughness.cpp
     # Motivation: face-local wall metadata must not inherit a later wall's
     # density representation or treat explicit zero as absent.
     ${CMAKE_CURRENT_SOURCE_DIR}/BoundaryConditions/ERF_GTestWallBCMetadata.cpp
@@ -122,6 +126,9 @@ target_sources(${erf_exe_name}
     ${CMAKE_CURRENT_SOURCE_DIR}/Diagnostics/ERF_GTestSurfaceFluxDiagnostics.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Diagnostics/ERF_GTestSeaLevelPressure.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/IO/ERF_GTestPlotfile2D.cpp
+    # Motivation: the urban fraction diagnostic is written by a positional fill
+    # block, so its catalog entry and that block must stay in the same order.
+    ${CMAKE_CURRENT_SOURCE_DIR}/IO/ERF_GTestUrbanFraction.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/IO/ERF_GTestPlotfileSelection.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/IO/ERF_GTestProvenance.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Utils/EOS/ERF_GTestEOSScalar.cpp
@@ -149,6 +156,11 @@ target_sources(${erf_exe_name}
 if(ERF_ENABLE_NOAHMP)
   target_sources(${erf_exe_name} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/LandSurfaceModel/Noah-MP/ERF_GTestNoahMPResultPolicy.cpp
+    # Motivation: the urban canopy shadow model keys off an absolute date that
+    # only ERF can supply, so the epoch <-> calendar round trip, the Julian day
+    # advanced by elapsed time, and the solar declination and hour angle that
+    # follow from it must be pinned independently of a full Noah-MP run.
+    ${CMAKE_CURRENT_SOURCE_DIR}/LandSurfaceModel/Noah-MP/ERF_GTestNoahMPCalendar.cpp
   )
 endif()
 build_erf_exe(${erf_exe_name} NO_ERF_MAIN)

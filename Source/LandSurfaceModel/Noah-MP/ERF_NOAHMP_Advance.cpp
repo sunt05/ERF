@@ -13,9 +13,20 @@
 #include <ERF_NOAHMP.H>
 #include <ERF_Constants.H>
 #include <ERF_EOS.H>
+#include <ERF_OrbCosZenith.H>
 #include "ERF_NOAHMP_ResultPolicy.H"
 
 using namespace amrex;
+
+namespace erf_noahmp {
+// Defined in ERF_NOAHMP_Init.cpp (which also documents the JULIAN convention:
+// 1-based day-of-year plus the UTC fraction of the day, 1.0 == Jan 1 00Z).
+// Declared here rather than in a header for the same reason ERF.cpp:130
+// declares read_start_time_from_wrfinput this way -- these belong in
+// ERF_NOAHMP.H, which is outside the scope of this change.
+double epoch_from_calendar (int yr, double julian);
+void   calendar_from_epoch (double epoch, int& yr, double& julian);
+} // namespace erf_noahmp
 
 // ---------------------------------------------------------------------------
 //  Fine-level interpolation (no per-level NetCDF land file)
@@ -382,6 +393,49 @@ NOAHMP::Advance_With_State (const int& lev,
         Vector<erf_noahmp::ClampedPrecipCell>   clamped_cells;
         Vector<erf_noahmp::InvariantPrecipCell> invariant_cells;
 
+        // ------------------------------------------------------------------
+        // Calendar + solar declination for this firing.
+        //
+        // ERF stages the date: `elapsed_time` is ERF's simulation time at the
+        // end of the step being coupled (ERF_Advance.cpp:325), measured from
+        // the origin NOAHMP::Init pinned into START_YR/START_JULIAN. Deriving
+        // it Fortran-side from itimestep*DTBL instead would double-book the
+        // subcycling gate above -- NoahmpIO's itimestep is re-seeded from
+        // m_itimestep every firing, it is not an independent counter -- and
+        // would drift from the clock RRTMGP already runs on.
+        //
+        // DECLIN uses the same orbital routines as ERF's radiation
+        // (ERF_Radiation.cpp:1088-1099), so the land model and RRTMGP cannot
+        // see different suns. Noah-MP's JULIAN and ERF's `calday` share the
+        // 1-based, Jan-1-00Z-is-1.0 convention, so JULIAN goes in unchanged.
+        // The blocks are all on the same clock, so this is computed once.
+        // ------------------------------------------------------------------
+        int  noah_yr     = 0;
+        Real noah_julian = Real(0.0);
+        Real noah_declin = Real(0.0);
+        if (!noahmpio_vect.empty()) {
+            const double epoch0 = erf_noahmp::epoch_from_calendar(
+                noahmpio_vect[0].START_YR,
+                static_cast<double>(noahmpio_vect[0].START_JULIAN));
+
+            double julian_now = 0.0;
+            erf_noahmp::calendar_from_epoch(epoch0 + static_cast<double>(elapsed_time),
+                                            noah_yr, julian_now);
+            noah_julian = static_cast<Real>(julian_now);
+
+            // Berger (1978) orbit for the current year, then the declination at
+            // this calday. eccen/obliq/mvelp are outputs here (no fixed-orbit
+            // override), which is what orbital_params does for iyear_AD >= 0.
+            double eccen = 0.0, obliq = 0.0, mvelp = 0.0;
+            double obliqr = 0.0, lambm0 = 0.0, mvelpp = 0.0;
+            int orbital_year = noah_yr;
+            orbital_params(orbital_year, eccen, obliq, mvelp, obliqr, lambm0, mvelpp);
+
+            double delta = 0.0, eccf = 0.0, calday = julian_now;
+            orbital_decl(calday, eccen, mvelpp, lambm0, obliqr, delta, eccf);
+            noah_declin = static_cast<Real>(delta);
+        }
+
         // Loop over blocks: ERF -> Noahmp, drive the land model, Noahmp -> ERF.
         int idb = 0;
         for (MFIter mfi(cons_in); mfi.isValid(); ++mfi, ++idb) {
@@ -408,8 +462,16 @@ NOAHMP::Advance_With_State (const int& lev,
                           cons_in, xvel_in, yvel_in,
                           precip, clamped_cells, invariant_cells);
 
-            // (4) Drive Noah-MP. Mirror the authoritative counter into the block first.
+            // (4) Drive Noah-MP. Mirror the authoritative counter and the model
+            //     date into the block first: Noah-MP phenology (DYNAMIC_VEG
+            //     options 1/3/4 interpolate monthly LAI off JULIAN), the
+            //     irrigation trigger and SLUCM's shadow/solar geometry all read
+            //     these, and before the calendar was wired they were frozen at
+            //     2000-01-01.
             blk.io->itimestep = m_itimestep;
+            blk.io->YR        = noah_yr;
+            blk.io->JULIAN    = static_cast<noahmp_real>(noah_julian);
+            blk.io->DECLIN    = static_cast<noahmp_real>(noah_declin);
             blk.io->DriverMain();
 
             // (5-6) NoahmpIO results -> pinned output -> ERF coupling fields.

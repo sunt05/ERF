@@ -1,0 +1,218 @@
+name: Linux GCC NetCDF Noah-MP
+
+# Phase 1 item 1 of Source/LandSurfaceModel/Noah-MP/dev/plan-slucm-coupling.md:
+# before this workflow existed, `grep -i noahmp .github/workflows/` returned
+# nothing, so Tests/Unit/LandSurfaceModel/Noah-MP/ERF_GTestNoahMPResultPolicy.cpp
+# -- gated on `if(ERF_ENABLE_NOAHMP)` in Tests/Unit/CMakeLists.txt -- had never
+# been compiled by CI. Everything else in the SLUCM plan depends on this job.
+
+on: [push, pull_request, workflow_dispatch]
+
+concurrency:
+  group: ${{ github.ref }}-${{ github.head_ref }}-linux-gcc-noahmp
+  cancel-in-progress: true
+
+jobs:
+  noahmp:
+    name: GNU C++17 Release - NetCDF - Noah-MP
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    env:
+      ERF_DIR: ${{ github.workspace }}/erf_clone
+      SPACK_ENV_NAME: erf_noahmp
+    steps:
+
+    - uses: actions/checkout@v7
+      with:
+        # Noah-MP lives in Submodules/Noah-MP and globs its own sources out of
+        # ../../src and ../../utility, so a top-level-only submodule checkout is
+        # not enough.
+        submodules: recursive
+        path: erf_clone
+
+    # Installs build-essential, g++, gfortran, libopenmpi-dev, openmpi-bin.
+    # gfortran is mandatory here: Noah-MP is a Fortran library and
+    # drivers/erf/CMakeLists.txt does project(NoahMP LANGUAGES Fortran CXX C).
+    - name: Install Dependencies
+      run: ${ERF_DIR}/Submodules/AMReX/.github/workflows/dependencies/dependencies.sh
+
+    # drivers/erf/CMakeLists.txt runs tools/NoahmpMacro.py at *configure* time
+    # (find_package(Python3 COMPONENTS Interpreter REQUIRED)); without it the
+    # generated NoahmpIO.{H,cpp}, NoahmpIO_fi.F90, NoahmpIOVarType.F90 and
+    # NoahmpIOVarInitMod.F90 never exist and the source glob finds nothing.
+    - name: Install Python
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends python3
+
+    - name: Install CCache
+      run: ${ERF_DIR}/Submodules/AMReX/.github/workflows/dependencies/dependencies_ccache.sh
+
+    - name: Free up disk space
+      uses: ./erf_clone/.github/actions/free-space-ubuntu
+
+    - name: Set Up Cache
+      uses: actions/cache@v6
+      with:
+        path: ~/.cache/ccache
+        key: ccache-${{ github.workflow }}-${{ github.job }}-git-${{ github.sha }}
+        restore-keys: |
+             ccache-${{ github.workflow }}-${{ github.job }}-git-
+
+    - name: Setup Spack
+      uses: spack/setup-spack@v3
+      with:
+        spack_path: ${{ github.workspace }}/spack_install_dir
+
+    - name: Install CA certificates
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ca-certificates
+        sudo update-ca-certificates
+
+    # Ubuntu's libnetcdf-dev is a SERIAL netcdf-c and does not install
+    # netcdf_par.h, which Source/IO/ERF_NCInterface.H includes unconditionally.
+    # Spack is therefore not a convenience here but a requirement: netcdf-c must
+    # be built +mpi, which in turn wants hdf5+mpi. ERF_ENABLE_HDF5 also defaults
+    # to ON whenever ERF_ENABLE_NETCDF is ON (CMakeLists.txt), and AMReX then
+    # requires a PARALLEL HDF5 -- same +mpi build satisfies both.
+    - name: Set Up NetCDF
+      run: |
+        . ${{ github.workspace }}/spack_install_dir/share/spack/setup-env.sh
+        export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+        export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+        export CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+        spack env create ${SPACK_ENV_NAME}
+        spack env activate ${SPACK_ENV_NAME}
+        spack add openmpi
+        spack add hdf5+mpi+hl
+        spack add netcdf-c+mpi
+        spack add netcdf-fortran
+        spack concretize -f
+        spack install --deprecated
+
+    - name: Configure Project and Generate Build System
+      run: |
+        . ${{ github.workspace }}/spack_install_dir/share/spack/setup-env.sh
+        spack env activate ${SPACK_ENV_NAME}
+
+        export HDF5_ROOT=$(spack location -i hdf5)
+        export NETCDF_C_ROOT=$(spack location -i netcdf-c)
+        export NETCDF_FORTRAN_ROOT=$(spack location -i netcdf-fortran)
+        # Both ERF's CMake/FindNetCDF.cmake and the Noah-MP submodule's bundled
+        # cmake-modules/FindNetCDF.cmake key off NETCDF_DIR (cache var and env).
+        export NETCDF_DIR=${NETCDF_C_ROOT}
+
+        # Hard requirement, not a nicety: Source/IO/ERF_NCInterface.H does
+        # `#include <netcdf_par.h>` with no guard, and a serial netcdf-c does
+        # not install that header at all.
+        if [ ! -f "${NETCDF_C_ROOT}/include/netcdf_par.h" ]; then
+          echo "ERROR: ${NETCDF_C_ROOT} is a serial netcdf-c (no netcdf_par.h)."
+          echo "       Source/IO/ERF_NCInterface.H requires a parallel build."
+          exit 1
+        fi
+
+        # The Noah-MP submodule ships cmake-modules/FindNetCDF.cmake, whose F90
+        # interface check is find_path/find_library with NO_DEFAULT_PATH,
+        # restricted to the directories where netcdf.h and libnetcdf were found.
+        # Spack installs netcdf-c and netcdf-fortran under *different* prefixes,
+        # so that search can never succeed and NETCDF_INCLUDES_F90 /
+        # NETCDF_LIBRARIES_F90 must be supplied by hand. Pre-seeding them into
+        # the cache also short-circuits the equivalent search in ERF's own
+        # CMake/FindNetCDF.cmake, so this is correct whichever of the two
+        # modules wins on CMAKE_MODULE_PATH.
+        NETCDF_F90_INC=${NETCDF_FORTRAN_ROOT}/include
+        NETCDF_F90_LIB=$(ls ${NETCDF_FORTRAN_ROOT}/lib/libnetcdff.so \
+                            ${NETCDF_FORTRAN_ROOT}/lib/libnetcdff.a 2>/dev/null | head -n1)
+        if [ ! -f "${NETCDF_F90_INC}/netcdf.mod" ] || [ -z "${NETCDF_F90_LIB}" ]; then
+          echo "ERROR: could not locate the netcdf-fortran F90 interface under"
+          echo "       ${NETCDF_FORTRAN_ROOT} (need include/netcdf.mod and lib/libnetcdff.*)"
+          exit 1
+        fi
+        echo "netcdf-c       : ${NETCDF_C_ROOT}"
+        echo "netcdf-fortran : ${NETCDF_FORTRAN_ROOT}"
+        echo "NETCDF_F90_INC : ${NETCDF_F90_INC}"
+        echo "NETCDF_F90_LIB : ${NETCDF_F90_LIB}"
+
+        cmake \
+          -B${ERF_DIR}/build \
+          -DCMAKE_INSTALL_PREFIX:PATH=${ERF_DIR}/install \
+          -DCMAKE_BUILD_TYPE:STRING=Release \
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+          -DERF_DIM:STRING=3 \
+          -DERF_ENABLE_MPI:BOOL=ON \
+          -DERF_ENABLE_NETCDF:BOOL=ON \
+          -DERF_ENABLE_NOAHMP:BOOL=ON \
+          -DERF_ENABLE_HDF5:BOOL=ON \
+          -DHDF5_ROOT=${HDF5_ROOT} \
+          -DNETCDF_DIR=${NETCDF_C_ROOT} \
+          -DNETCDF_INCLUDES_F90:PATH=${NETCDF_F90_INC} \
+          -DNETCDF_LIBRARIES_F90:FILEPATH=${NETCDF_F90_LIB} \
+          -DERF_ENABLE_UNIT_TESTS:BOOL=ON \
+          -DERF_PARALLEL_TEST_ALLOW_OVERSUBSCRIBE:BOOL=ON \
+          '-DERF_PARALLEL_TEST_NRANKS:STRING=1;2' \
+          ${ERF_DIR};
+
+    - name: Compile and Link
+      run: |
+        . ${{ github.workspace }}/spack_install_dir/share/spack/setup-env.sh
+        spack env activate ${SPACK_ENV_NAME}
+
+        export CCACHE_COMPRESS=1
+        export CCACHE_COMPRESSLEVEL=10
+        export CCACHE_MAXSIZE=300M
+        ccache -z
+
+        set +e
+        cmake --build ${ERF_DIR}/build --parallel 2 --verbose \
+          2>&1 | tee ${{ github.workspace }}/build-output.txt
+        # cmake is first in the pipe, so check *its* status and not tee's.
+        build_rc=${PIPESTATUS[0]}
+        set -e
+
+        ccache -s
+        du -hs ~/.cache/ccache || true
+        exit ${build_rc}
+
+    - name: Report Warnings
+      if: always()
+      run: |
+        # Informational only. Noah-MP is vendored third-party Fortran and is
+        # expected to be noisy; failing this job on its warnings would make the
+        # build gate useless. ERF's own warnings are still surfaced here.
+        # `|| true`: with bash -o pipefail a clean build (grep finds nothing,
+        # exit 1) would otherwise fail this step.
+        if [ -f ${{ github.workspace }}/build-output.txt ]; then
+          { grep -Ei "warning:|error:" ${{ github.workspace }}/build-output.txt \
+            | grep -Ev "Submodules/(AMReX|amrex|googletest|Noah-MP)" \
+            | grep -Ev "lto-wrapper: warning:" \
+            | sort | uniq \
+            | awk 'BEGIN{i=0}{print $0}{i++}END{print "Warnings: "i}' ; } || true
+        else
+          echo "no build output captured"
+        fi
+
+    # The point of this workflow: prove the ERF_ENABLE_NOAHMP-gated unit test
+    # source actually compiled and linked, not merely that *some* tests exist.
+    - name: Check Noah-MP Unit Test Registration
+      run: |
+        Tests/Unit/erf_unit_tests --gtest_list_tests | tee ${{ github.workspace }}/unit-test-list.txt
+        grep -Eq '^[A-Za-z0-9_].*\.$' ${{ github.workspace }}/unit-test-list.txt
+        grep -q '^NoahMPResultPolicy\.' ${{ github.workspace }}/unit-test-list.txt \
+          || { echo "ERF_GTestNoahMPResultPolicy.cpp was not built into erf_unit_tests"; exit 1; }
+      working-directory: ${{ github.workspace }}/erf_clone/build
+
+    - name: Run Serial Unit Tests
+      run: |
+        . ${{ github.workspace }}/spack_install_dir/share/spack/setup-env.sh
+        spack env activate ${SPACK_ENV_NAME}
+        ctest -L unit --output-on-failure --no-tests=error
+      working-directory: ${{ github.workspace }}/erf_clone/build
+
+    - name: Run Parallel Unit Tests
+      run: |
+        . ${{ github.workspace }}/spack_install_dir/share/spack/setup-env.sh
+        spack env activate ${SPACK_ENV_NAME}
+        ctest -L parallel --output-on-failure --no-tests=error
+      working-directory: ${{ github.workspace }}/erf_clone/build

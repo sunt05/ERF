@@ -12,6 +12,7 @@ enum class DiagnosticID
 {
     ZSurf,
     LandMask,
+    UrbFrac,
     MapFac,
     LatM,
     LonM,

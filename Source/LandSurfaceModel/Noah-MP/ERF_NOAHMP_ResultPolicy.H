@@ -42,6 +42,12 @@ bool result_is_valid_for_output (amrex::Real value, int output_comp) noexcept
     if (output_comp == NoahmpOutputComp::o_noahmp_fveg) {
         return value >= amrex::Real(0.0) && value <= amrex::Real(1.0);
     }
+    if (output_comp == NoahmpOutputComp::o_znt) {
+        // Strictly positive: result_is_valid accepts 0.0, but the MOST stress
+        // kernels evaluate log(zref/z0) (ERF_MOSTStress.H), which is +inf at
+        // z0 == 0 and NaN for z0 < 0.
+        return value > amrex::Real(0.0);
+    }
     return true;
 }
 
