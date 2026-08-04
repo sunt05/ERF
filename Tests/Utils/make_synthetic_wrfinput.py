@@ -14,7 +14,7 @@ in CI, containing every field that
 ``Source/Initialization/ERF_InitFromWRFInput.cpp``,
 ``Source/IO/ERF_ReadFromWRFInput.cpp`` and
 ``Submodules/Noah-MP/drivers/erf/NoahmpReadLandMod.F90`` read, plus the urban
-statics (``FRC_URB2D``, ``IVGTYP == ISURBAN``) that the SLUCM tile keys off.
+static fields (``FRC_URB2D``, ``IVGTYP == ISURBAN``) that the SLUCM tile keys off.
 
 No boundary file is produced.  Run with ``erf.real_width = 0`` and no
 ``erf.nc_bdy_file`` so nothing needs a fabricated ``wrfbdy``.
