@@ -1,0 +1,72 @@
+&NOAHLSM_OFFLINE
+
+ ERF_SETUP_FILE_01 = "wrfinput_urban_d01"
+
+! Must match the Times stamp written into the synthetic wrfinput by
+! run_smoke.sh (--start-date 2020-07-01_19:00:00).  19 Z at longitude -105 is
+! local solar noon, so the urban tile is exercised with the sun high rather
+! than at a grazing angle where SLUCM's canyon shading does almost nothing.
+ START_YEAR  = 2020
+ START_MONTH = 07
+ START_DAY   = 01
+ START_HOUR  = 19
+ START_MIN   = 00
+
+ KDAY = 1
+ SPINUP_LOOPS = 0
+
+ DYNAMIC_VEG_OPTION                = 4
+ CANOPY_STOMATAL_RESISTANCE_OPTION = 1
+ BTR_OPTION                        = 1
+ SURFACE_RUNOFF_OPTION             = 3
+ SUBSURFACE_RUNOFF_OPTION          = 3
+ DVIC_INFILTRATION_OPTION          = 1
+ SURFACE_DRAG_OPTION               = 1
+ FROZEN_SOIL_OPTION                = 1
+ SUPERCOOLED_WATER_OPTION          = 1
+ RADIATIVE_TRANSFER_OPTION         = 3
+ SNOW_ALBEDO_OPTION                = 1
+ PCP_PARTITION_OPTION              = 1
+ SNOW_THERMAL_CONDUCTIVITY         = 1
+ TBOT_OPTION                       = 2
+ TEMP_TIME_SCHEME_OPTION           = 1
+ GLACIER_OPTION                    = 1
+ SURFACE_RESISTANCE_OPTION         = 1
+ SOIL_DATA_OPTION                  = 1
+ PEDOTRANSFER_OPTION               = 1
+ CROP_OPTION                       = 0
+ IRRIGATION_OPTION                 = 0
+ IRRIGATION_METHOD                 = 0
+ TILE_DRAINAGE_OPTION              = 0
+
+! 300 s so max_step = 1800 at erf.fixed_dt = 1.0 gives six Noah-MP firings.
+ FORCING_TIMESTEP = 300
+ NOAH_TIMESTEP    = 300
+ OUTPUT_TIMESTEP  = 300
+
+ SPLIT_OUTPUT_COUNT = 24
+ SKIP_FIRST_OUTPUT = .false.
+ RESTART_FREQUENCY_HOURS = 24
+
+ NSNOW = 4
+! SF_URBAN_PHYSICS = 1 requires NSOIL = 4: urban_param_init forces
+! num_roof/wall/road_layers = num_soil_layers and urban_var_init hard-codes
+! TRL_URB3D(I,1..4,J).
+ NSOIL = 4
+
+ soil_thick_input(1) = 0.10
+ soil_thick_input(2) = 0.30
+ soil_thick_input(3) = 0.60
+ soil_thick_input(4) = 1.00
+
+! SLUCM reads ZA_URB from this namelist value, not from z(klo).  With
+! USE_WUDAPT_LCZ = 0 every urban cell is UTYPE 2, whose URBPARM.TBL building
+! height clears the ZLVL = 10 threshold; see plan-slucm-coupling.md 7.2.
+ ZLVL = 10.0
+
+! run_smoke.sh rewrites this line to 0 for the rural control run, so the two
+! runs cannot drift apart in any other setting.
+ SF_URBAN_PHYSICS = 1
+ USE_WUDAPT_LCZ = 0
+
+/
