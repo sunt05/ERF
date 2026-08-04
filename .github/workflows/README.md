@@ -30,10 +30,14 @@ jobs:
     if: needs.changes.outputs.run-<area> == 'true'
 ```
 
-Keeping the condition a single output reference is deliberate. The moment a
-workflow starts composing `needs.changes.outputs.core == 'true' || ...` inline,
-the policy has been copied, and the copies drift. Add a new `run-*` output
-instead.
+Keeping the condition a single output reference is deliberate, and enforced:
+`detect-changes.yml` exports only `run-*` answers, never the raw categories
+behind them. There is deliberately no `needs.changes.outputs.core` to compose
+against, because the moment a workflow starts writing its own
+`core == 'true' || build == 'true'` the policy has been copied and the copies
+drift. A new routing need gets a new `run-*` output. The raw categories remain
+visible in each run's routing summary, which is where you want them when you are
+working out *why* something was skipped.
 
 ## Two tiers
 

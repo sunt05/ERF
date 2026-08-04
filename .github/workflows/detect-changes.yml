@@ -42,8 +42,9 @@ on:
         type: string
         default: ''
     outputs:
-      # Per-workflow decisions. Prefer these over the raw categories below:
-      # they keep the policy in this file instead of in every caller's `if:`.
+      # Per-workflow decisions -- the entire public surface of this workflow.
+      # Callers get an answer ("should you run?"), never the evidence, which is
+      # what keeps the policy in this file instead of in every caller's `if:`.
       run-lint:
         description: 'Style / formatting checks'
         value: ${{ jobs.detect.outputs.run-lint }}
@@ -72,32 +73,11 @@ on:
         description: 'Sphinx documentation build'
         value: ${{ jobs.detect.outputs.run-docs }}
 
-      # Raw categories, for a caller that genuinely needs to compose its own
-      # condition. Adding a new policy here is preferred to composing in-place.
-      core:
-        description: 'ERF solver sources changed'
-        value: ${{ jobs.detect.outputs.core }}
-      noahmp:
-        description: 'Noah-MP / SLUCM sources changed'
-        value: ${{ jobs.detect.outputs.noahmp }}
-      rrtmgp:
-        description: 'RRTMGP sources changed'
-        value: ${{ jobs.detect.outputs.rrtmgp }}
-      build:
-        description: 'Build system changed'
-        value: ${{ jobs.detect.outputs.build }}
-      submodules:
-        description: 'Submodule pointers changed'
-        value: ${{ jobs.detect.outputs.submodules }}
-      docs:
-        description: 'Prose changed'
-        value: ${{ jobs.detect.outputs.docs }}
-      docs-only:
-        description: 'Nothing but prose changed'
-        value: ${{ jobs.detect.outputs.docs-only }}
-      integration:
-        description: 'This event is an integration-tier event'
-        value: ${{ jobs.detect.outputs.integration }}
+      # Deliberately no raw-category outputs (core, docs, integration, ...).
+      # Exporting them would invite callers to compose their own conditions,
+      # which copies the policy back out into the workflows this file exists to
+      # keep it out of. A new routing need gets a new run-* output here.
+      # The raw categories are still visible in the run's routing summary.
 
   workflow_dispatch:
     inputs:
@@ -123,26 +103,20 @@ jobs:
       run-windows: ${{ steps.decide.outputs.run-windows }}
       run-macos: ${{ steps.decide.outputs.run-macos }}
       run-docs: ${{ steps.decide.outputs.run-docs }}
-      docs-only: ${{ steps.decide.outputs.docs-only }}
-      integration: ${{ steps.decide.outputs.integration }}
-      core: ${{ steps.filter.outputs.core }}
-      noahmp: ${{ steps.filter.outputs.noahmp }}
-      lsm: ${{ steps.filter.outputs.lsm }}
-      rrtmgp: ${{ steps.filter.outputs.rrtmgp }}
-      build: ${{ steps.filter.outputs.build }}
-      submodules: ${{ steps.filter.outputs.submodules }}
-      tests: ${{ steps.filter.outputs.tests }}
-      exec: ${{ steps.filter.outputs.exec }}
-      docs: ${{ steps.filter.outputs.docs }}
-      paper: ${{ steps.filter.outputs.paper }}
-      ci: ${{ steps.filter.outputs.ci }}
     steps:
       - uses: actions/checkout@v7
         with:
-          # Full history: a push to a feature branch is compared against its
-          # merge base with the default branch, which a shallow clone cannot
+          # Full commit history: a push to a feature branch is compared against
+          # its merge base with the default branch, which a shallow clone cannot
           # find.
           fetch-depth: 0
+          # ...but not the file contents of that history. Routing needs commits
+          # and trees (merge-base, then a name-only diff); it never reads a
+          # historical blob. Without this, all 13 gated workflows each clone
+          # ~5000 commits' worth of blobs on every event just to decide whether
+          # to do anything -- the exact waste this whole change exists to stop.
+          # Blobs for the checked-out HEAD are still fetched lazily on demand.
+          filter: blob:none
           persist-credentials: false
 
       - name: Resolve comparison base
