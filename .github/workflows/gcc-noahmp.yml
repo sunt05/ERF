@@ -13,7 +13,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Feature-based routing: see .github/workflows/detect-changes.yml.
+  # `run-noahmp` is true whenever Noah-MP, any sibling land-surface model, the
+  # build system or a submodule pointer moves -- and for any code change at
+  # integration time, since a core solver edit can break this build without
+  # touching a Noah-MP file.
+  changes:
+    uses: ./.github/workflows/detect-changes.yml
+
   noahmp:
+    needs: changes
+    if: needs.changes.outputs.run-noahmp == 'true'
     name: GNU C++17 Release - NetCDF - Noah-MP
     runs-on: ubuntu-22.04
     permissions:

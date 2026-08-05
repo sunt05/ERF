@@ -1,4 +1,18 @@
-on: [push]
+name: Paper Draft
+
+# Only the JOSS paper sources can change this PDF, so filter natively at the
+# trigger: the workflow never starts, and no routing job is needed. Previously
+# this fired on every push to every branch.
+on:
+  push:
+    paths:
+      - paper/**
+      - .github/workflows/draft-pdf.yml
+  pull_request:
+    paths:
+      - paper/**
+      - .github/workflows/draft-pdf.yml
+  workflow_dispatch:
 
 jobs:
   paper:

@@ -2,14 +2,22 @@ name: ERF CI
 
 on:
   push:
-    # branches: [development]
+    # Integration tier only: on a feature branch this workflow can never run
+    # (see detect-changes.yml), so firing it there spawns a routing job just to
+    # compute a foregone "skip". Upstream had this line ready but commented.
+    branches: [development]
     paths-ignore:
-      - Docs
+      # `Docs` on its own only matches a FILE named Docs, so the directory was
+      # never actually ignored; `Docs/**` is what was meant. Finer-grained
+      # routing now lives in .github/workflows/detect-changes.yml.
+      - Docs/**
       - README.rst
       - license.txt
 
   pull_request:
     branches: [development]
+
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.ref }}-${{ github.head_ref }}-ci
@@ -17,7 +25,13 @@ concurrency:
 
 jobs:
 
+  # Feature-based routing: see .github/workflows/detect-changes.yml
+  changes:
+    uses: ./.github/workflows/detect-changes.yml
+
   Build-And-Test:
+    needs: changes
+    if: needs.changes.outputs.run-erf-ci == 'true'
     runs-on: ${{matrix.os}}
     name: OS ${{matrix.os}} - Particles ${{matrix.particles}}
     env:

@@ -1,0 +1,126 @@
+# Path filter categories for ERF's feature-based CI.
+#
+# This file is the single source of truth for the question "which builds does
+# this change actually need?". It is consumed by the reusable
+# `.github/workflows/detect-changes.yml` workflow, which turns these raw
+# categories into per-workflow run/skip decisions.
+#
+# Used by:   .github/workflows/detect-changes.yml
+# Tested by: scripts/ci/test-detect-changes.sh (runs the same action via `act`,
+#            against this same file, so local results match CI)
+#
+# IMPORTANT -- DO NOT use negation patterns (a leading `!`) in this file.
+# dorny/paths-filter evaluates patterns with OR logic (picomatch). A negation
+# such as `!Source/foo.cpp` matches EVERY file that is NOT Source/foo.cpp,
+# which silently turns the whole category into a catch-all:
+#   https://github.com/dorny/paths-filter/issues/184
+#
+# Two conventions follow from that:
+#
+#   1. Where a documentation tree lives inside a source tree -- ERF has
+#      Source/LandSurfaceModel/Noah-MP/dev/ and
+#      Source/PhysicsInterfaces/Radiation/*.md -- match code EXTENSIONS rather
+#      than the directory. That excludes the prose without needing a negation,
+#      so editing a design note does not trigger a 20-minute Spack + parallel
+#      NetCDF build.
+#   2. Accept minor overlap between categories rather than trying to carve
+#      exclusive ones. Overlap costs an occasional extra build; a botched
+#      exclusion costs a missed one.
+#
+# Category guide:
+#   core        -- ERF solver sources; any compiled build is affected
+#   noahmp      -- Noah-MP / SLUCM land-surface feature (gcc-noahmp.yml)
+#   lsm         -- land-surface models generally (Noah-MP builds link these)
+#   rrtmgp      -- RRTMGP radiation feature (gcc-rrtmgp.yml)
+#   build       -- CMake / GNUmake build system; affects every build
+#   submodules  -- submodule pointers and vendored trees
+#   tests       -- unit, regression and gold-file test infrastructure
+#   exec        -- Exec/ problem setups and their build glue
+#   docs        -- prose: Sphinx docs, design notes, READMEs, JOSS paper
+#                  (the JOSS paper build is filtered natively in draft-pdf.yml,
+#                  so it needs no category of its own here)
+#   ci          -- workflows and CI tooling; forces a full re-validation
+
+core:
+  # Extension-matched, not directory-matched: Source/ contains .md design
+  # notes that must not trigger compiles. See convention 1 above.
+  - 'Source/**/*.H'
+  - 'Source/**/*.h'
+  - 'Source/**/*.cpp'
+  - 'Source/**/*.F90'
+  - 'Source/**/*.f90'
+  - 'Source/**/Make.package'
+
+noahmp:
+  # Source/LandSurfaceModel/Noah-MP/dev/ holds the SLUCM coupling plan and the
+  # Noah-MP specs. Those are prose and belong to `docs`, so this category lists
+  # extensions rather than 'Source/LandSurfaceModel/Noah-MP/**'.
+  - 'Source/LandSurfaceModel/Noah-MP/*.H'
+  - 'Source/LandSurfaceModel/Noah-MP/*.cpp'
+  - 'Source/LandSurfaceModel/Noah-MP/Make.package'
+  # The interface every land-surface model implements.
+  - 'Source/LandSurfaceModel/ERF_LandSurface.H'
+  # The unit test that only compiles under -DERF_ENABLE_NOAHMP=ON.
+  - 'Tests/Unit/LandSurfaceModel/**'
+  # Submodule pointer: the vendored Noah-MP Fortran, including the urban tile.
+  - 'Submodules/Noah-MP'
+
+lsm:
+  # Broader than `noahmp`: a change to a sibling land-surface model (MM5, SLM,
+  # OceanSurf, Null) can still break the Noah-MP build, because they share
+  # ERF_LandSurface.H and are selected through the same dispatch.
+  - 'Source/LandSurfaceModel/**/*.H'
+  - 'Source/LandSurfaceModel/**/*.cpp'
+  - 'Source/LandSurfaceModel/**/Make.package'
+
+rrtmgp:
+  - 'Source/PhysicsInterfaces/Radiation/*.H'
+  - 'Source/PhysicsInterfaces/Radiation/*.cpp'
+  - 'Source/PhysicsInterfaces/Radiation/Make.package'
+  - 'Source/PhysicsInterfaces/eamxx_config.h'
+  - 'Source/TimeIntegration/ERF_AdvanceRadiation.cpp'
+  - 'Submodules/RRTMGP'
+  - 'Submodules/ekat'
+
+build:
+  - 'CMakeLists.txt'
+  - '**/CMakeLists.txt'
+  - 'CMake/**'
+  - 'CTestConfig.cmake'
+  - 'Exec/GNUmakefile'
+  - 'Exec/Make.ERF'
+  - 'Exec/Make.ERF.general'
+  - 'Exec/Make.package'
+  - 'Exec/Tools/GNUmakefile'
+
+submodules:
+  # A submodule pointer bump shows up as a change to the gitlink path itself
+  # (e.g. `Submodules/AMReX`, no trailing slash), so both patterns are needed:
+  # the single-segment one catches the pointer, the globstar one catches
+  # anything vendored in-tree.
+  - '.gitmodules'
+  - 'Submodules/*'
+  - 'Submodules/**'
+
+tests:
+  - 'Tests/**'
+
+exec:
+  - 'Exec/**'
+
+docs:
+  - 'Docs/**'
+  - 'paper/**'
+  - 'README.rst'
+  - '**/*.md'
+  - '**/*.rst'
+  - 'CHANGES'
+  - 'CITATION.cff'
+  - 'LICENSE.md'
+  - 'copyright.txt'
+
+ci:
+  # A CI change re-validates everything -- otherwise a broken workflow edit
+  # only surfaces on the next unrelated source change.
+  - '.github/**'
+  - 'scripts/ci/**'

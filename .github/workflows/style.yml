@@ -1,13 +1,19 @@
 name: Style
 
-on: [push, pull_request]
+on: [push, pull_request, workflow_dispatch]
 
 concurrency:
   group: ${{ github.ref }}-${{ github.head_ref }}-style
   cancel-in-progress: true
 
 jobs:
+  # Feature-based routing: see .github/workflows/detect-changes.yml
+  changes:
+    uses: ./.github/workflows/detect-changes.yml
+
   tabs:
+    needs: changes
+    if: needs.changes.outputs.run-lint == 'true'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
@@ -15,6 +21,8 @@ jobs:
         run: .github/workflows/style/check_tabs.sh
 
   trailing_whitespaces:
+    needs: changes
+    if: needs.changes.outputs.run-lint == 'true'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
