@@ -2028,6 +2028,9 @@ List of Parameters
 +-------------------------------------+----------------------------------------+-------------------+-----------------------------------+
 | **erf.rad_freq_in_steps**           | Radiation update frequency (steps)     | Integer >= 1      | 1                                 |
 +-------------------------------------+----------------------------------------+-------------------+-----------------------------------+
+| **erf.rad_freq_in_steps_<lev>**     | Per-level update frequency; overrides  | Integer >= 1      | Common radiation frequency        |
+|                                     | the common value for AMR level <lev>   |                   |                                   |
++-------------------------------------+----------------------------------------+-------------------+-----------------------------------+
 | **erf.rad_ncol_chunk**              | Columns per RRTMGP kernel launch.      | Integer >= 1      | 5000. Lower values reduce peak    |
 |                                     | Controls peak GPU memory by processing |                   | GPU memory; higher values reduce  |
 |                                     | radiation in batches of this size.     |                   | kernel launch overhead.           |
@@ -2205,18 +2208,29 @@ are detected. These checks are activated at runtime using the input parameters b
 List of Parameters
 ------------------
 
-+-----------------------------+---------------------------+-------------------+------------+
-| Parameter                   | Definition                | Acceptable Values | Default    |
-+=============================+===========================+===================+============+
-| **erf.check_for_nans**      | Test solution for NaNs    |  int              | 0          |
-+-----------------------------+---------------------------+-------------------+------------+
-| **amrex.fpe_trap_invalid**  | Raise errors for NaNs     |  0 / 1            | 0          |
-+-----------------------------+---------------------------+-------------------+------------+
-| **amrex.fpe_trap_zero**     | Raise errors for divide   |  0 / 1            | 0          |
-|                             | by zero                   |                   |            |
-+-----------------------------+---------------------------+-------------------+------------+
-| **amrex.fpe_trap_overflow** | Raise errors for overflow |  0 / 1            | 0          |
-+-----------------------------+---------------------------+-------------------+------------+
++----------------------------------------------+---------------------------+-------------------+------------+
+| Parameter                                    | Definition                | Acceptable Values | Default    |
++==============================================+===========================+===================+============+
+| **erf.check_for_nans**                       | Test solution for NaNs    |  int              | 0          |
++----------------------------------------------+---------------------------+-------------------+------------+
+| **erf.moisture_temperature_abort_threshold** | Abort below temperature   | Real >= 150 K;    | 188.16 K   |
+|                                              | guard for moist states    | below 188.16 K are|            |
+|                                              |                           | WSM6-only         |            |
++----------------------------------------------+---------------------------+-------------------+------------+
+| **amrex.fpe_trap_invalid**                   | Raise errors for NaNs     |  0 / 1            | 0          |
++----------------------------------------------+---------------------------+-------------------+------------+
+| **amrex.fpe_trap_zero**                      | Raise errors for divide   |  0 / 1            | 0          |
+|                                              | by zero                   |                   |            |
++----------------------------------------------+---------------------------+-------------------+------------+
+| **amrex.fpe_trap_overflow**                  | Raise errors for overflow |  0 / 1            | 0          |
++----------------------------------------------+---------------------------+-------------------+------------+
+
+The default moisture-temperature threshold corresponds to the lower limit of
+the ice-saturation derivative fit used by several schemes. WSM6 computes its
+own closed-form saturation relations and may opt into a lower threshold. Such
+an override should remain below all physically plausible model temperatures,
+but above catastrophic numerical states, and must be recorded with the run
+configuration; it is not a temperature clip.
 
 Reproducibility
 ===============

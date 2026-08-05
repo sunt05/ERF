@@ -381,6 +381,101 @@ if(ERF_ENABLE_EKAT)
   message(VERBOSE "EKAT binary directory: ${EKAT_BIN}")
   add_subdirectory(${PROJECT_SOURCE_DIR}/Submodules/ekat ${EKAT_BIN})
 
+  # EKAT's SetCudaFlags(kokkoscore) assumes Kokkos CUDA sources use the CXX
+  # language.  With Kokkos' native CMake CUDA-language mode, that call exports
+  # --expt-extended-lambda to downstream CXX targets, where host compilers
+  # reject it.  Remove only the invalid interface expression; kokkoscore's own
+  # CUDA compile options remain untouched.
+  if(ERF_ENABLE_CUDA AND Kokkos_ENABLE_COMPILE_AS_CMAKE_LANGUAGE AND TARGET kokkoscore)
+    get_target_property(ERF_KOKKOS_INTERFACE_OPTIONS kokkoscore INTERFACE_COMPILE_OPTIONS)
+    if(ERF_KOKKOS_INTERFACE_OPTIONS AND
+       NOT ERF_KOKKOS_INTERFACE_OPTIONS STREQUAL "ERF_KOKKOS_INTERFACE_OPTIONS-NOTFOUND")
+      set(ERF_KOKKOS_FILTERED_INTERFACE_OPTIONS ${ERF_KOKKOS_INTERFACE_OPTIONS})
+      list(FILTER ERF_KOKKOS_FILTERED_INTERFACE_OPTIONS EXCLUDE REGEX
+           "COMPILE_LANGUAGE:CXX.*expt-extended-lambda")
+      set_property(TARGET kokkoscore PROPERTY INTERFACE_COMPILE_OPTIONS
+                   "${ERF_KOKKOS_FILTERED_INTERFACE_OPTIONS}")
+
+      foreach(ERF_KOKKOS_INTERFACE_OPTION IN LISTS ERF_KOKKOS_FILTERED_INTERFACE_OPTIONS)
+        if(ERF_KOKKOS_INTERFACE_OPTION MATCHES
+           "COMPILE_LANGUAGE:CXX.*expt-extended-lambda")
+          message(FATAL_ERROR
+                  "Kokkos still exports --expt-extended-lambda to CXX targets")
+        endif()
+      endforeach()
+
+      if(ERF_KOKKOS_FILTERED_INTERFACE_OPTIONS STREQUAL ERF_KOKKOS_INTERFACE_OPTIONS)
+        message(STATUS "Verified Kokkos does not export CUDA lambda flags to CXX targets")
+      else()
+        message(STATUS "Removed CXX-scoped CUDA lambda flags from the Kokkos interface")
+      endif()
+    endif()
+
+    # Native CMake CUDA mode requires consumers that include CUDA-enabled
+    # Kokkos headers to compile as CUDA.  EKAT creates this utility target
+    # before control returns here, so fix its source language without changing
+    # the vendored submodule.
+    if(TARGET ekat_kokkosutils)
+      get_target_property(ERF_EKAT_KOKKOS_SOURCES ekat_kokkosutils SOURCES)
+      get_target_property(ERF_EKAT_KOKKOS_SOURCE_DIR ekat_kokkosutils SOURCE_DIR)
+      if(ERF_EKAT_KOKKOS_SOURCES AND
+         NOT ERF_EKAT_KOKKOS_SOURCES STREQUAL "ERF_EKAT_KOKKOS_SOURCES-NOTFOUND" AND
+         ERF_EKAT_KOKKOS_SOURCE_DIR AND
+         NOT ERF_EKAT_KOKKOS_SOURCE_DIR STREQUAL "ERF_EKAT_KOKKOS_SOURCE_DIR-NOTFOUND")
+        set(ERF_EKAT_KOKKOS_ABSOLUTE_SOURCES)
+        foreach(ERF_EKAT_KOKKOS_SOURCE IN LISTS ERF_EKAT_KOKKOS_SOURCES)
+          get_filename_component(ERF_EKAT_KOKKOS_ABSOLUTE_SOURCE
+                                 "${ERF_EKAT_KOKKOS_SOURCE}" ABSOLUTE
+                                 BASE_DIR "${ERF_EKAT_KOKKOS_SOURCE_DIR}")
+          list(APPEND ERF_EKAT_KOKKOS_ABSOLUTE_SOURCES
+               "${ERF_EKAT_KOKKOS_ABSOLUTE_SOURCE}")
+        endforeach()
+
+        set_source_files_properties(${ERF_EKAT_KOKKOS_ABSOLUTE_SOURCES}
+          TARGET_DIRECTORY ekat_kokkosutils PROPERTIES LANGUAGE CUDA)
+
+        # Kokkos enables CMAKE_CUDA_SEPARABLE_COMPILATION inside its own
+        # subdirectory when RDC is requested.  That directory-scoped default
+        # does not initialize CUDA targets created by EKAT's parent directory,
+        # although the generated desul configuration requires every CUDA
+        # consumer to use the same RDC mode.
+        if(Kokkos_ENABLE_CUDA_RELOCATABLE_DEVICE_CODE)
+          set_property(TARGET ekat_kokkosutils PROPERTY CUDA_SEPARABLE_COMPILATION ON)
+          get_target_property(ERF_EKAT_KOKKOS_SEPARABLE_COMPILATION
+                              ekat_kokkosutils CUDA_SEPARABLE_COMPILATION)
+          if(NOT ERF_EKAT_KOKKOS_SEPARABLE_COMPILATION)
+            message(FATAL_ERROR
+                    "EKAT Kokkos utility target did not enable CUDA separable compilation")
+          endif()
+          message(STATUS "Configured EKAT Kokkos utility target for CUDA RDC")
+        endif()
+
+        foreach(ERF_EKAT_KOKKOS_ABSOLUTE_SOURCE IN LISTS ERF_EKAT_KOKKOS_ABSOLUTE_SOURCES)
+          get_source_file_property(ERF_EKAT_KOKKOS_LANGUAGE
+                                   "${ERF_EKAT_KOKKOS_ABSOLUTE_SOURCE}"
+                                   TARGET_DIRECTORY ekat_kokkosutils LANGUAGE)
+          if(NOT ERF_EKAT_KOKKOS_LANGUAGE STREQUAL "CUDA")
+            message(FATAL_ERROR
+                    "EKAT Kokkos utility source was not configured as CUDA: "
+                    "${ERF_EKAT_KOKKOS_ABSOLUTE_SOURCE}")
+          endif()
+        endforeach()
+        message(STATUS "Configured EKAT Kokkos utility sources for native CUDA")
+      endif()
+    endif()
+
+    unset(ERF_EKAT_KOKKOS_ABSOLUTE_SOURCE)
+    unset(ERF_EKAT_KOKKOS_ABSOLUTE_SOURCES)
+    unset(ERF_EKAT_KOKKOS_LANGUAGE)
+    unset(ERF_EKAT_KOKKOS_SEPARABLE_COMPILATION)
+    unset(ERF_EKAT_KOKKOS_SOURCE)
+    unset(ERF_EKAT_KOKKOS_SOURCE_DIR)
+    unset(ERF_EKAT_KOKKOS_SOURCES)
+    unset(ERF_KOKKOS_INTERFACE_OPTION)
+    unset(ERF_KOKKOS_FILTERED_INTERFACE_OPTIONS)
+    unset(ERF_KOKKOS_INTERFACE_OPTIONS)
+  endif()
+
   # Print Kokkos properties
   if(TARGET Kokkos::kokkos)
     print_target_properties(Kokkos::kokkos)
