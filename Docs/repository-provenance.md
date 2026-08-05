@@ -28,10 +28,11 @@ The following work is intentionally retained in this repository:
   `development`;
 - `sunt05/ERF#2`: file-driven surface flux forcing and GPU/boundary
   robustness, superseding the closed upstream draft
-  `erf-model/ERF#3530`;
+  `erf-model/ERF#3530`, integrated into `development` on 2026-08-05;
 - `sunt05/ERF#3`: repository contribution guidance, merged into
   `development`; and
-- `sunt05/ERF#4`: feature-based CI routing.
+- `sunt05/ERF#4`: feature-based CI routing, integrated into `development` on
+  2026-08-05.
 
 These patch series are maintained for the experimental repository as coherent
 local capabilities. Their presence here is not a commitment to submit them
