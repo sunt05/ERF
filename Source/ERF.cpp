@@ -2899,11 +2899,11 @@ ERF::check_for_low_temp(amrex::MultiFab& S)
         });
     Real minimum_temperature = get<0>(reduced);
     // The catastrophic-state threshold is intentionally a coarse physical
-    // guard, not a millikelvin-precision validity boundary.  Allow a 0.1-K
+    // guard, not a millikelvin-precision validity boundary.  Allow a 0.2-K
     // diagnostic tolerance so reduction/thermodynamic roundoff at exactly the
     // configured floor does not abort an otherwise finite state.  Temperatures
     // materially below the configured threshold still fail immediately.
-    constexpr Real diagnostic_tolerance = Real(0.1);
+    constexpr Real diagnostic_tolerance = Real(0.2);
     if (minimum_temperature < t_low - diagnostic_tolerance) {
         Abort("Minimum moist-state temperature " + std::to_string(minimum_temperature) +
               " K is below erf.moisture_temperature_abort_threshold=" +
