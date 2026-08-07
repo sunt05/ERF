@@ -174,8 +174,8 @@ struct SolverChoice {
 
         pp.query_enum_case_insensitive("moisture_model",moisture_type);
         pp.query("moisture_temperature_abort_threshold", moisture_temperature_abort_threshold);
-        if (moisture_temperature_abort_threshold < amrex::Real(150.0)) {
-            amrex::Error("moisture_temperature_abort_threshold must be at least 150 K");
+        if (moisture_temperature_abort_threshold < amrex::Real(140.0)) {
+            amrex::Error("moisture_temperature_abort_threshold must be at least 140 K");
         }
         if (moisture_temperature_abort_threshold < amrex::Real(188.16) &&
             moisture_type != MoistureType::WSM6) {
