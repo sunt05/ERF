@@ -7,6 +7,7 @@
 */
 
 #include <memory>
+#include <iomanip>
 
 #include "ERF_EOS.H"
 #include "ERF.H"
@@ -2905,6 +2906,81 @@ ERF::check_for_low_temp(amrex::MultiFab& S)
     // materially below the configured threshold still fail immediately.
     constexpr Real diagnostic_tolerance = Real(0.2);
     if (minimum_temperature < t_low - diagnostic_tolerance) {
+        // Record one cell attaining the reduced minimum so a guard failure can
+        // be diagnosed without changing or clipping the prognostic state.
+        amrex::Gpu::DeviceScalar<int> d_found(0);
+        amrex::Gpu::DeviceVector<int> d_index(3, -1);
+        // temperature, pressure, rho, rho-theta, theta, qv, qc, qi, qr, qs, qg
+        amrex::Gpu::DeviceVector<Real> d_values(11, Real(0.0));
+
+        int* found = d_found.dataPtr();
+        int* index = d_index.dataPtr();
+        Real* values = d_values.dataPtr();
+        const int ncomp = S.nComp();
+        const Real match_ceiling = minimum_temperature + Real(1.0e-8);
+
+        for (MFIter mfi(S,TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            const Box& bx = mfi.tilebox();
+            auto const& s_arr = S.const_array(mfi);
+
+            ParallelFor(bx,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+            {
+                if (*found) return;
+
+                const Real rho      = s_arr(i,j,k,Rho_comp);
+                const Real rhotheta = s_arr(i,j,k,RhoTheta_comp);
+                const Real qv       = s_arr(i,j,k,RhoQ1_comp) / rho;
+                const Real temp     = getTgivenRandRTh(rho, rhotheta, qv);
+
+                if (temp <= match_ceiling &&
+                    amrex::Gpu::Atomic::CAS(found,0,1) == 0)
+                {
+                    index[0] = i;
+                    index[1] = j;
+                    index[2] = k;
+                    values[0] = temp;
+                    values[1] = getPgivenRTh(rhotheta, qv);
+                    values[2] = rho;
+                    values[3] = rhotheta;
+                    values[4] = rhotheta / rho;
+                    values[5] = qv;
+                    values[6] = (ncomp > RhoQ2_comp) ? s_arr(i,j,k,RhoQ2_comp) / rho : Real(0.0);
+                    values[7] = (ncomp > RhoQ3_comp) ? s_arr(i,j,k,RhoQ3_comp) / rho : Real(0.0);
+                    values[8] = (ncomp > RhoQ4_comp) ? s_arr(i,j,k,RhoQ4_comp) / rho : Real(0.0);
+                    values[9] = (ncomp > RhoQ5_comp) ? s_arr(i,j,k,RhoQ5_comp) / rho : Real(0.0);
+                    values[10] = (ncomp > RhoQ6_comp) ? s_arr(i,j,k,RhoQ6_comp) / rho : Real(0.0);
+                }
+            });
+        }
+
+        amrex::Gpu::streamSynchronize();
+
+        if (d_found.dataValue()) {
+            amrex::Vector<int> h_index(3);
+            amrex::Vector<Real> h_values(11);
+            amrex::Gpu::copy(amrex::Gpu::deviceToHost,
+                             d_index.begin(), d_index.end(), h_index.begin());
+            amrex::Gpu::copy(amrex::Gpu::deviceToHost,
+                             d_values.begin(), d_values.end(), h_values.begin());
+
+            amrex::Print() << std::setprecision(15)
+                << "Cold-state diagnostic: cell=(" << h_index[0] << ","
+                << h_index[1] << "," << h_index[2] << ")"
+                << " T=" << h_values[0] << " K"
+                << " p=" << h_values[1] << " Pa"
+                << " rho=" << h_values[2] << " kg m^-3"
+                << " rho_theta=" << h_values[3]
+                << " theta=" << h_values[4] << " K"
+                << " qv=" << h_values[5]
+                << " qc=" << h_values[6]
+                << " qi=" << h_values[7]
+                << " qr=" << h_values[8]
+                << " qs=" << h_values[9]
+                << " qg=" << h_values[10] << " kg kg^-1\n";
+        }
+
         Abort("Minimum moist-state temperature " + std::to_string(minimum_temperature) +
               " K is below erf.moisture_temperature_abort_threshold=" +
               std::to_string(t_low) + " K");
