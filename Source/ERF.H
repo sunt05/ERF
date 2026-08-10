@@ -294,7 +294,14 @@ public:
     void check_state_for_nans(amrex::MultiFab const& S);
     void check_vels_for_nans(amrex::MultiFab const& xvel, amrex::MultiFab const& yvel, amrex::MultiFab const& zvel);
     void check_for_negative_theta (amrex::MultiFab& S);
-    void check_for_low_temp       (amrex::MultiFab& S);
+    void check_for_low_temp       (amrex::MultiFab& S,
+                                   const std::string& stage = "unspecified",
+                                   int lev = -1,
+                                   amrex::Real time = amrex::Real(-1.0),
+                                   amrex::Real dt = amrex::Real(0.0),
+                                   const amrex::MultiFab* reference_state = nullptr,
+                                   const amrex::MultiFab* explicit_source = nullptr,
+                                   const amrex::MultiFab* radiation_heating = nullptr);
 
     void compute_max_pressure_gradient_diagnostic(int lev);
 

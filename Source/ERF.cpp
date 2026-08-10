@@ -2878,7 +2878,14 @@ ERF::check_vels_for_nans(MultiFab const& xvel, MultiFab const& yvel, MultiFab co
 }
 
 void
-ERF::check_for_low_temp(amrex::MultiFab& S)
+ERF::check_for_low_temp(amrex::MultiFab& S,
+                        const std::string& stage,
+                        int lev,
+                        amrex::Real time,
+                        amrex::Real dt,
+                        const amrex::MultiFab* reference_state,
+                        const amrex::MultiFab* explicit_source,
+                        const amrex::MultiFab* radiation_heating)
 {
     // *****************************************************************************
     // Test for low temp (low is defined as beyond the selected microphysics range
@@ -2910,19 +2917,29 @@ ERF::check_for_low_temp(amrex::MultiFab& S)
         // be diagnosed without changing or clipping the prognostic state.
         amrex::Gpu::DeviceScalar<int> d_found(0);
         amrex::Gpu::DeviceVector<int> d_index(3, -1);
-        // temperature, pressure, rho, rho-theta, theta, qv, qc, qi, qr, qs, qg
-        amrex::Gpu::DeviceVector<Real> d_values(11, Real(0.0));
+        // New state (0:10), reference state (11:16), explicit sources (17:18),
+        // and shortwave/longwave radiation heating rates (19:20).
+        amrex::Gpu::DeviceVector<Real> d_values(21, Real(0.0));
 
         int* found = d_found.dataPtr();
         int* index = d_index.dataPtr();
         Real* values = d_values.dataPtr();
         const int ncomp = S.nComp();
         const Real match_ceiling = minimum_temperature + Real(1.0e-8);
+        const bool has_reference = reference_state != nullptr;
+        const bool has_source = explicit_source != nullptr;
+        const bool has_radiation = radiation_heating != nullptr;
 
         for (MFIter mfi(S,TilingIfNotGPU()); mfi.isValid(); ++mfi)
         {
             const Box& bx = mfi.tilebox();
             auto const& s_arr = S.const_array(mfi);
+            const auto ref_arr = has_reference
+                ? reference_state->const_array(mfi) : Array4<const Real>{};
+            const auto src_arr = has_source
+                ? explicit_source->const_array(mfi) : Array4<const Real>{};
+            const auto rad_arr = has_radiation
+                ? radiation_heating->const_array(mfi) : Array4<const Real>{};
 
             ParallelFor(bx,
             [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
@@ -2951,6 +2968,26 @@ ERF::check_for_low_temp(amrex::MultiFab& S)
                     values[8] = (ncomp > RhoQ4_comp) ? s_arr(i,j,k,RhoQ4_comp) / rho : Real(0.0);
                     values[9] = (ncomp > RhoQ5_comp) ? s_arr(i,j,k,RhoQ5_comp) / rho : Real(0.0);
                     values[10] = (ncomp > RhoQ6_comp) ? s_arr(i,j,k,RhoQ6_comp) / rho : Real(0.0);
+
+                    if (has_reference) {
+                        const Real ref_rho = ref_arr(i,j,k,Rho_comp);
+                        const Real ref_rhotheta = ref_arr(i,j,k,RhoTheta_comp);
+                        const Real ref_qv = ref_arr(i,j,k,RhoQ1_comp) / ref_rho;
+                        values[11] = getTgivenRandRTh(ref_rho, ref_rhotheta, ref_qv);
+                        values[12] = getPgivenRTh(ref_rhotheta, ref_qv);
+                        values[13] = ref_rho;
+                        values[14] = ref_rhotheta;
+                        values[15] = ref_rhotheta / ref_rho;
+                        values[16] = ref_qv;
+                    }
+                    if (has_source) {
+                        values[17] = src_arr(i,j,k,Rho_comp);
+                        values[18] = src_arr(i,j,k,RhoTheta_comp);
+                    }
+                    if (has_radiation) {
+                        values[19] = rad_arr(i,j,k,0);
+                        values[20] = rad_arr(i,j,k,1);
+                    }
                 }
             });
         }
@@ -2959,14 +2996,18 @@ ERF::check_for_low_temp(amrex::MultiFab& S)
 
         if (d_found.dataValue()) {
             amrex::Vector<int> h_index(3);
-            amrex::Vector<Real> h_values(11);
+            amrex::Vector<Real> h_values(21);
             amrex::Gpu::copy(amrex::Gpu::deviceToHost,
                              d_index.begin(), d_index.end(), h_index.begin());
             amrex::Gpu::copy(amrex::Gpu::deviceToHost,
                              d_values.begin(), d_values.end(), h_values.begin());
 
             amrex::Print() << std::setprecision(15)
-                << "Cold-state diagnostic: cell=(" << h_index[0] << ","
+                << "Cold-state diagnostic: stage=" << stage
+                << " level=" << lev
+                << " time=" << time << " s"
+                << " dt=" << dt << " s"
+                << " cell=(" << h_index[0] << ","
                 << h_index[1] << "," << h_index[2] << ")"
                 << " T=" << h_values[0] << " K"
                 << " p=" << h_values[1] << " Pa"
@@ -2979,6 +3020,44 @@ ERF::check_for_low_temp(amrex::MultiFab& S)
                 << " qr=" << h_values[8]
                 << " qs=" << h_values[9]
                 << " qg=" << h_values[10] << " kg kg^-1\n";
+
+            if (reference_state != nullptr) {
+                const Real inv_dt = (dt > Real(0.0)) ? Real(1.0) / dt : Real(0.0);
+                const Real total_rho_tendency = (h_values[2] - h_values[13]) * inv_dt;
+                const Real total_rhotheta_tendency = (h_values[3] - h_values[14]) * inv_dt;
+                const Real radiation_rhotheta_tendency =
+                    h_values[13] * (h_values[19] + h_values[20]);
+                const Real residual_rhotheta_tendency =
+                    total_rhotheta_tendency - h_values[18];
+
+                amrex::Print() << std::setprecision(15)
+                    << "Cold-state tendency diagnostic: stage=" << stage
+                    << " level=" << lev
+                    << " time=" << time << " s"
+                    << " dt=" << dt << " s"
+                    << " cell=(" << h_index[0] << ","
+                    << h_index[1] << "," << h_index[2] << ")"
+                    << " reference_T=" << h_values[11] << " K"
+                    << " reference_p=" << h_values[12] << " Pa"
+                    << " reference_rho=" << h_values[13] << " kg m^-3"
+                    << " reference_rho_theta=" << h_values[14]
+                    << " reference_theta=" << h_values[15] << " K"
+                    << " reference_qv=" << h_values[16] << " kg kg^-1"
+                    << " delta_T=" << h_values[0] - h_values[11] << " K"
+                    << " T_tendency=" << (h_values[0] - h_values[11]) * inv_dt << " K s^-1"
+                    << " total_rho_tendency=" << total_rho_tendency << " kg m^-3 s^-1"
+                    << " total_rho_theta_tendency=" << total_rhotheta_tendency
+                    << " kg K m^-3 s^-1"
+                    << " last_rk_explicit_rho_source=" << h_values[17] << " kg m^-3 s^-1"
+                    << " last_rk_explicit_rho_theta_source=" << h_values[18]
+                    << " kg K m^-3 s^-1"
+                    << " sw_heating=" << h_values[19] << " K s^-1"
+                    << " lw_heating=" << h_values[20] << " K s^-1"
+                    << " radiation_rho_theta_source=" << radiation_rhotheta_tendency
+                    << " kg K m^-3 s^-1"
+                    << " finite_step_minus_last_rk_explicit_rho_theta="
+                    << residual_rhotheta_tendency << " kg K m^-3 s^-1\n";
+            }
         }
 
         Abort("Minimum moist-state temperature " + std::to_string(minimum_temperature) +

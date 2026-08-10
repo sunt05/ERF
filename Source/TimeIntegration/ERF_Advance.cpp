@@ -261,7 +261,7 @@ ERF::Advance (int lev, double time, double dt_lev, int iteration, int /*ncycle*/
         if (verbose > 1) {
             amrex::Print() << "Testing on low temperature before dycore" << std::endl;
         }
-        check_for_low_temp(S_old);
+        check_for_low_temp(S_old, "pre_dycore", lev, time, dt_lev);
     } else {
         if (verbose > 1) {
             amrex::Print() << "Testing on negative temperature before dycore" << std::endl;
@@ -296,7 +296,8 @@ ERF::Advance (int lev, double time, double dt_lev, int iteration, int /*ncycle*/
         if (verbose > 1) {
             amrex::Print() << "Testing on low temperature after dycore" << std::endl;
         }
-        check_for_low_temp(S_new);
+        check_for_low_temp(S_new, "post_dycore", lev, time + dt_lev, dt_lev,
+                           &S_old, &cc_source, qheating_rates[lev].get());
     } else {
         // Otherwise we will test on negative (rhotheta) coming out of the dycore
         if (verbose > 1) {
