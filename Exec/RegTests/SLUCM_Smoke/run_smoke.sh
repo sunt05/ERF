@@ -98,6 +98,29 @@ for CASE in urban rural; do
     ln -sf "$RRTMGP/extensions/cloud_optics/rrtmgp-cloud-optics-coeffs-lw.nc" "$RUNDIR/"
 
     echo "[smoke] running $CASE (np = $NP)"
+
+    # How to start the run. The default reproduces the previous behaviour
+    # exactly: `mpirun -np N` for more than one rank, and a bare exec for one,
+    # which is what a workstation with a normal MPI wants.
+    #
+    # That default is wrong on a machine whose MPI can only be started through
+    # the batch system. On Cray with Slurm there is no usable `mpirun`, and a
+    # bare exec inside an allocation fails in PMI rather than running serially,
+    # so BOTH branches need redirecting. Set ERF_MPI_LAUNCH to a launcher that
+    # takes the rank count as its final argument, e.g.
+    #
+    #     ERF_MPI_LAUNCH="srun -n" ./run_smoke.sh --exe ... --np 1
+    #
+    # Leaving it unset changes nothing.
+    if [ -n "${ERF_MPI_LAUNCH:-}" ]; then
+        read -r -a LAUNCH <<< "$ERF_MPI_LAUNCH"
+        LAUNCH+=("$NP")
+    elif [ "$NP" -gt 1 ]; then
+        LAUNCH=(mpirun -np "$NP")
+    else
+        LAUNCH=()
+    fi
+
     set +e
     if [ "$NP" -gt 1 ]; then
         # Two overrides are needed to decompose this case, and both are about
@@ -112,12 +135,12 @@ for CASE in urban rural; do
         #    2-D plotfile is simply switched off here.
         #
         # Verified 1 rank vs 2 ranks: all 54 land fields bit-identical.
-        ( cd "$RUNDIR" && mpirun -np "$NP" "$EXE" inputs_slucm \
+        ( cd "$RUNDIR" && "${LAUNCH[@]}" "$EXE" inputs_slucm \
               "amr.max_grid_size_x=$MGS_X" amr.max_grid_size_y=10 \
               amr.max_grid_size_z=20 amr.blocking_factor=1 \
               erf.plot2d_int_1=-1 > run.log 2>&1 )
     else
-        ( cd "$RUNDIR" && "$EXE" inputs_slucm > run.log 2>&1 )
+        ( cd "$RUNDIR" && "${LAUNCH[@]}" "$EXE" inputs_slucm > run.log 2>&1 )
     fi
     rc=$?
     set -e

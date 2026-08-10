@@ -31,6 +31,18 @@ coefficient files out of the submodules, runs the case twice, and calls
 is written. `python3` with `netCDF4` is needed for the generator and the
 checker; `--no-check` skips the latter.
 
+On a machine whose MPI can only be started through the batch system, set
+`ERF_MPI_LAUNCH` to a launcher that takes the rank count last:
+
+```bash
+ERF_MPI_LAUNCH="srun -n" ./run_smoke.sh --exe ... --work ...
+```
+
+This is needed on Cray with Slurm, where there is no usable `mpirun` and a bare
+exec inside an allocation fails in PMI rather than running serially — so the
+single-rank path needs redirecting too, not just `--np > 1`. Leaving the
+variable unset reproduces the previous behaviour exactly.
+
 The NetCDF stack must be a *parallel* build: `Source/IO/ERF_NCInterface.H`
 includes `<netcdf_par.h>` unconditionally, and a serial netcdf-c does not
 install that header. Ubuntu's `libnetcdf-dev` and Homebrew's `netcdf` are both
