@@ -122,7 +122,20 @@ automatically, and both are about ERF and Noah-MP rather than about SLUCM:
   rather than an interaction is still an inference, not a finding.
 
 With those in place, 1 rank and 2 ranks agree **bit for bit** on all 54 land
-fields, which is the decomposition-independence check worth having.
+fields, which is the decomposition-independence check worth having. Run it with
+`compare_ranks.py`, which takes two work directories and compares every field:
+
+```bash
+./run_smoke.sh --exe ... --work /tmp/np1 --np 1
+./run_smoke.sh --exe ... --work /tmp/np2 --np 2
+./compare_ranks.py /tmp/np1 /tmp/np2
+```
+
+Bit-for-bit is deliberately the bar: a decomposition must not perturb a
+per-column land calculation at all, so a difference of any size is a bug in halo
+exchange, in Noah-MP's box assumptions, or in the urban tile's indexing — not
+something to absorb into a tolerance. NaN compares equal to NaN, since masked
+land points are everywhere and would otherwise swamp the result.
 
 ## Reference output
 
