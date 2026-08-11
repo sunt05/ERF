@@ -207,6 +207,13 @@ ERF::Advance (int lev, double time, double dt_lev, int iteration, int /*ncycle*/
 
     int nvars = S_old.nComp();
 
+    // Read-only diagnostic storage for the three compressible RK stages.  Each
+    // stage records advection, turbulent/molecular diffusion, explicit source,
+    // total slow-RHS, and the residual fast/acoustic contribution for rho and
+    // rho-theta.  The values are only reported if the existing cold guard fires.
+    MultiFab cold_dycore_diagnostics(ba, dm, 27, 0);
+    cold_dycore_diagnostics.setVal(0);
+
     // Source array for conserved cell-centered quantities -- this will be filled
     //     in the call to make_sources in ERF_TI_slow_rhs_pre.H
     MultiFab cc_source(ba,dm,nvars,1); cc_source.setVal(0);
@@ -276,6 +283,7 @@ ERF::Advance (int lev, double time, double dt_lev, int iteration, int /*ncycle*/
                    U_old, V_old, W_old,
                    U_new, V_new, W_new,
                    cc_source, xmom_source, ymom_source, zmom_source, buoyancy,
+                   &cold_dycore_diagnostics,
                    Geom(lev), dt_lev, time);
 
     // **************************************************************************************
@@ -297,7 +305,8 @@ ERF::Advance (int lev, double time, double dt_lev, int iteration, int /*ncycle*/
             amrex::Print() << "Testing on low temperature after dycore" << std::endl;
         }
         check_for_low_temp(S_new, "post_dycore", lev, time + dt_lev, dt_lev,
-                           &S_old, &cc_source, qheating_rates[lev].get());
+                           &S_old, &cc_source, qheating_rates[lev].get(),
+                           &cold_dycore_diagnostics);
     } else {
         // Otherwise we will test on negative (rhotheta) coming out of the dycore
         if (verbose > 1) {

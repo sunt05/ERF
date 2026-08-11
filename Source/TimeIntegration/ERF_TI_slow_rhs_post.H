@@ -143,6 +143,27 @@
         apply_bcs(S_new, new_stage_time, S_new[IntVars::cons].nGrow(), S_new[IntVars::xmom].nGrow(),
                   fast_only=false, vel_and_mom_synced=false);
 
+        if (cold_dycore_diagnostics && slow_dt > 0.0) {
+            const int cold_diag_offset = nrk * 9;
+            const Real inv_slow_dt = one / static_cast<Real>(slow_dt);
+            for (MFIter mfi(S_new[IntVars::cons], TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+                const Box& bx = mfi.tilebox();
+                const auto snew = S_new[IntVars::cons].const_array(mfi);
+                const auto sold = S_old[IntVars::cons].const_array(mfi);
+                const auto srhs = S_rhs[IntVars::cons].const_array(mfi);
+                const auto cold_diag = cold_dycore_diagnostics->array(mfi);
+                ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+                {
+                    cold_diag(i,j,k,cold_diag_offset + 7) =
+                        (snew(i,j,k,Rho_comp) - sold(i,j,k,Rho_comp)) * inv_slow_dt
+                        - srhs(i,j,k,Rho_comp);
+                    cold_diag(i,j,k,cold_diag_offset + 8) =
+                        (snew(i,j,k,RhoTheta_comp) - sold(i,j,k,RhoTheta_comp)) * inv_slow_dt
+                        - srhs(i,j,k,RhoTheta_comp);
+                });
+            }
+        }
+
         if (solverChoice.moisture_tight_coupling) {
             // TODO: need iteration var for lagrangian microphysics
             // call signature in ERF::Advance() is

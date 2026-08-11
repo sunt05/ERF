@@ -194,6 +194,7 @@
                          eamxx_shoc_interface[level].get(),
 #endif
                          native_shoc_driver[level].get(),
+                         cold_dycore_diagnostics,
                          fr_as_crse, fr_as_fine);
 
         Real sdt = static_cast<Real>(slow_dt);
@@ -261,6 +262,14 @@
         if (solverChoice.turbChoice[level].uses_native_shoc() && native_shoc_driver[level]) {
             // Native SHOC applies its increment directly to state; ERF no
             // longer adds a separate fast RHS contribution.
+        }
+
+        if (cold_dycore_diagnostics) {
+            const int cold_diag_offset = nrk * 9;
+            MultiFab::Copy(*cold_dycore_diagnostics, S_rhs[IntVars::cons],
+                           Rho_comp, cold_diag_offset + 5, 1, 0);
+            MultiFab::Copy(*cold_dycore_diagnostics, S_rhs[IntVars::cons],
+                           RhoTheta_comp, cold_diag_offset + 6, 1, 0);
         }
 
         // *****************************************************************************

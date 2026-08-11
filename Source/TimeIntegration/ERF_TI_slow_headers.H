@@ -102,6 +102,7 @@ void erf_slow_rhs_pre (int level, int finest_level, int nrk,
                       SHOCInterface* eamxx_shoc_lev,
 #endif
                       ShocDriver* native_shoc_lev,
+                      amrex::MultiFab* cold_dycore_diagnostics,
                       amrex::YAFluxRegister* fr_as_crse,
                       amrex::YAFluxRegister* fr_as_fine);
 

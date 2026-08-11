@@ -2885,7 +2885,8 @@ ERF::check_for_low_temp(amrex::MultiFab& S,
                         amrex::Real dt,
                         const amrex::MultiFab* reference_state,
                         const amrex::MultiFab* explicit_source,
-                        const amrex::MultiFab* radiation_heating)
+                        const amrex::MultiFab* radiation_heating,
+                        const amrex::MultiFab* dycore_diagnostics)
 {
     // *****************************************************************************
     // Test for low temp (low is defined as beyond the selected microphysics range
@@ -2918,8 +2919,11 @@ ERF::check_for_low_temp(amrex::MultiFab& S,
         amrex::Gpu::DeviceScalar<int> d_found(0);
         amrex::Gpu::DeviceVector<int> d_index(3, -1);
         // New state (0:10), reference state (11:16), explicit sources (17:18),
-        // and shortwave/longwave radiation heating rates (19:20).
-        amrex::Gpu::DeviceVector<Real> d_values(21, Real(0.0));
+        // shortwave/longwave radiation heating rates (19:20), and three RK
+        // stages of dycore decomposition (21:47; nine fields per stage).
+        constexpr int n_dycore_diagnostics = 27;
+        constexpr int n_diagnostic_values = 21 + n_dycore_diagnostics;
+        amrex::Gpu::DeviceVector<Real> d_values(n_diagnostic_values, Real(0.0));
 
         int* found = d_found.dataPtr();
         int* index = d_index.dataPtr();
@@ -2929,6 +2933,7 @@ ERF::check_for_low_temp(amrex::MultiFab& S,
         const bool has_reference = reference_state != nullptr;
         const bool has_source = explicit_source != nullptr;
         const bool has_radiation = radiation_heating != nullptr;
+        const bool has_dycore_diagnostics = dycore_diagnostics != nullptr;
 
         for (MFIter mfi(S,TilingIfNotGPU()); mfi.isValid(); ++mfi)
         {
@@ -2940,6 +2945,8 @@ ERF::check_for_low_temp(amrex::MultiFab& S,
                 ? explicit_source->const_array(mfi) : Array4<const Real>{};
             const auto rad_arr = has_radiation
                 ? radiation_heating->const_array(mfi) : Array4<const Real>{};
+            const auto dycore_arr = has_dycore_diagnostics
+                ? dycore_diagnostics->const_array(mfi) : Array4<const Real>{};
 
             ParallelFor(bx,
             [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
@@ -2988,6 +2995,11 @@ ERF::check_for_low_temp(amrex::MultiFab& S,
                         values[19] = rad_arr(i,j,k,0);
                         values[20] = rad_arr(i,j,k,1);
                     }
+                    if (has_dycore_diagnostics) {
+                        for (int n = 0; n < n_dycore_diagnostics; ++n) {
+                            values[21+n] = dycore_arr(i,j,k,n);
+                        }
+                    }
                 }
             });
         }
@@ -2996,7 +3008,7 @@ ERF::check_for_low_temp(amrex::MultiFab& S,
 
         if (d_found.dataValue()) {
             amrex::Vector<int> h_index(3);
-            amrex::Vector<Real> h_values(21);
+            amrex::Vector<Real> h_values(n_diagnostic_values);
             amrex::Gpu::copy(amrex::Gpu::deviceToHost,
                              d_index.begin(), d_index.end(), h_index.begin());
             amrex::Gpu::copy(amrex::Gpu::deviceToHost,
@@ -3057,6 +3069,52 @@ ERF::check_for_low_temp(amrex::MultiFab& S,
                     << " kg K m^-3 s^-1"
                     << " finite_step_minus_last_rk_explicit_rho_theta="
                     << residual_rhotheta_tendency << " kg K m^-3 s^-1\n";
+
+                if (dycore_diagnostics != nullptr) {
+                    for (int nrk = 0; nrk < 3; ++nrk) {
+                        const int off = 21 + nrk * 9;
+                        amrex::Print() << std::setprecision(15)
+                            << "Cold-state dycore diagnostic: rk=" << nrk + 1
+                            << " cell=(" << h_index[0] << ","
+                            << h_index[1] << "," << h_index[2] << ")"
+                            << " advection_rho=" << h_values[off]
+                            << " kg m^-3 s^-1"
+                            << " advection_rho_theta=" << h_values[off+1]
+                            << " kg K m^-3 s^-1"
+                            << " turbulent_diffusion_rho_theta=" << h_values[off+2]
+                            << " kg K m^-3 s^-1"
+                            << " explicit_source_rho=" << h_values[off+3]
+                            << " kg m^-3 s^-1"
+                            << " explicit_source_rho_theta=" << h_values[off+4]
+                            << " kg K m^-3 s^-1"
+                            << " total_slow_rhs_rho=" << h_values[off+5]
+                            << " kg m^-3 s^-1"
+                            << " total_slow_rhs_rho_theta=" << h_values[off+6]
+                            << " kg K m^-3 s^-1"
+                            << " fast_acoustic_residual_rho=" << h_values[off+7]
+                            << " kg m^-3 s^-1"
+                            << " fast_acoustic_residual_rho_theta=" << h_values[off+8]
+                            << " kg K m^-3 s^-1\n";
+                    }
+
+                    const int final_off = 21 + 2 * 9;
+                    const Real reconstructed_rho =
+                        h_values[final_off+5] + h_values[final_off+7];
+                    const Real reconstructed_rhotheta =
+                        h_values[final_off+6] + h_values[final_off+8];
+                    amrex::Print() << std::setprecision(15)
+                        << "Cold-state dycore closure: cell=(" << h_index[0] << ","
+                        << h_index[1] << "," << h_index[2] << ")"
+                        << " reconstructed_rho_tendency=" << reconstructed_rho
+                        << " kg m^-3 s^-1"
+                        << " rho_closure=" << total_rho_tendency - reconstructed_rho
+                        << " kg m^-3 s^-1"
+                        << " reconstructed_rho_theta_tendency=" << reconstructed_rhotheta
+                        << " kg K m^-3 s^-1"
+                        << " rho_theta_closure="
+                        << total_rhotheta_tendency - reconstructed_rhotheta
+                        << " kg K m^-3 s^-1\n";
+                }
             }
         }
 

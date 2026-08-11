@@ -111,6 +111,7 @@ void erf_slow_rhs_pre (int level, int finest_level,
                        SHOCInterface* eamxx_shoc_lev,
 #endif
                        ShocDriver* native_shoc_lev,
+                       MultiFab* cold_dycore_diagnostics,
                        YAFluxRegister* fr_as_crse,
                        YAFluxRegister* fr_as_fine)
 {
@@ -406,6 +407,9 @@ void erf_slow_rhs_pre (int level, int finest_level,
         const Array4<const Real> & cell_data  = S_data[IntVars::cons].array(mfi);
         const Array4<const Real> & cell_prim  = S_prim.array(mfi);
         const Array4<Real>       & cell_rhs   = S_rhs[IntVars::cons].array(mfi);
+        const int cold_diag_offset = nrk * 9;
+        const Array4<Real> cold_diag = cold_dycore_diagnostics
+            ? cold_dycore_diagnostics->array(mfi) : Array4<Real>{};
 
         const Array4<const Real> & cell_old   = S_old[IntVars::cons].array(mfi);
 
@@ -637,6 +641,14 @@ void erf_slow_rhs_pre (int level, int finest_level,
                                 already_on_centroids);
         }
 
+        if (cold_dycore_diagnostics) {
+            ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+            {
+                cold_diag(i,j,k,cold_diag_offset    ) = cell_rhs(i,j,k,Rho_comp);
+                cold_diag(i,j,k,cold_diag_offset + 1) = cell_rhs(i,j,k,RhoTheta_comp);
+            });
+        }
+
         if (l_use_diff) {
             Array4<Real> diffflux_x = dflux_x->array(mfi);
             Array4<Real> diffflux_y = dflux_y->array(mfi);
@@ -710,11 +722,25 @@ void erf_slow_rhs_pre (int level, int finest_level,
             }
         }
 
+        if (cold_dycore_diagnostics) {
+            ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+            {
+                cold_diag(i,j,k,cold_diag_offset + 2) =
+                    cell_rhs(i,j,k,RhoTheta_comp) - cold_diag(i,j,k,cold_diag_offset + 1);
+            });
+        }
+
         const Array4<Real const>& source_arr   = cc_src.const_array(mfi);
         ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
         {
             cell_rhs(i,j,k,Rho_comp)      += source_arr(i,j,k,Rho_comp);
             cell_rhs(i,j,k,RhoTheta_comp) += source_arr(i,j,k,RhoTheta_comp);
+            if (cold_diag) {
+                cold_diag(i,j,k,cold_diag_offset + 3) = source_arr(i,j,k,Rho_comp);
+                cold_diag(i,j,k,cold_diag_offset + 4) = source_arr(i,j,k,RhoTheta_comp);
+                cold_diag(i,j,k,cold_diag_offset + 5) = cell_rhs(i,j,k,Rho_comp);
+                cold_diag(i,j,k,cold_diag_offset + 6) = cell_rhs(i,j,k,RhoTheta_comp);
+            }
         });
 
         Real half_dt = static_cast<Real>(myhalf/dt);

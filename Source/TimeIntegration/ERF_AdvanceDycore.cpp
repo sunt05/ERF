@@ -43,6 +43,7 @@ void ERF::advance_dycore (int level,
                           MultiFab&   cc_src, MultiFab& xmom_src,
                           MultiFab& ymom_src, MultiFab& zmom_src,
                           MultiFab& buoyancy,
+                          MultiFab* cold_dycore_diagnostics,
                           const Geometry fine_geom,
                           const double dt_advance, const double old_time)
 {

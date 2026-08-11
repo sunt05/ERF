@@ -301,7 +301,8 @@ public:
                                    amrex::Real dt = amrex::Real(0.0),
                                    const amrex::MultiFab* reference_state = nullptr,
                                    const amrex::MultiFab* explicit_source = nullptr,
-                                   const amrex::MultiFab* radiation_heating = nullptr);
+                                   const amrex::MultiFab* radiation_heating = nullptr,
+                                   const amrex::MultiFab* dycore_diagnostics = nullptr);
 
     void compute_max_pressure_gradient_diagnostic(int lev);
 
@@ -451,7 +452,9 @@ public:
                          amrex::MultiFab& xvel_new,  amrex::MultiFab& yvel_new,  amrex::MultiFab& zvel_new,
                          amrex::MultiFab& source,    amrex::MultiFab& xmom_src,
                          amrex::MultiFab& ymom_src,  amrex::MultiFab& zmom_src,
-                         amrex::MultiFab& buoyancy,  amrex::Geometry fine_geom,
+                         amrex::MultiFab& buoyancy,
+                         amrex::MultiFab* cold_dycore_diagnostics,
+                         amrex::Geometry fine_geom,
                          double dt, double time);
 
     void advance_microphysics (int lev,
