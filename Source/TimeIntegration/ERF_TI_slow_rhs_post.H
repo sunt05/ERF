@@ -144,7 +144,7 @@
                   fast_only=false, vel_and_mom_synced=false);
 
         if (cold_dycore_diagnostics && slow_dt > 0.0) {
-            const int cold_diag_offset = nrk * 9;
+            const int cold_diag_offset = nrk * 17;
             const Real inv_slow_dt = one / static_cast<Real>(slow_dt);
             for (MFIter mfi(S_new[IntVars::cons], TilingIfNotGPU()); mfi.isValid(); ++mfi) {
                 const Box& bx = mfi.tilebox();

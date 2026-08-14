@@ -407,7 +407,7 @@ void erf_slow_rhs_pre (int level, int finest_level,
         const Array4<const Real> & cell_data  = S_data[IntVars::cons].array(mfi);
         const Array4<const Real> & cell_prim  = S_prim.array(mfi);
         const Array4<Real>       & cell_rhs   = S_rhs[IntVars::cons].array(mfi);
-        const int cold_diag_offset = nrk * 9;
+        const int cold_diag_offset = nrk * 17;
         const Array4<Real> cold_diag = cold_dycore_diagnostics
             ? cold_dycore_diagnostics->array(mfi) : Array4<Real>{};
 
@@ -612,6 +612,24 @@ void erf_slow_rhs_pre (int level, int finest_level,
                                 ax_arr, ay_arr, az_arr, detJ_arr,
                                 dxInv, mf_mx, mf_my, mf_uy, mf_vx,
                                 flx_arr, l_fixed_rho);
+            if (cold_dycore_diagnostics) {
+                ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+                {
+                    if (!l_fixed_rho && detJ_arr(i,j,k) > zero) {
+                        const Real metric = -mf_mx(i,j,0) * mf_my(i,j,0) / detJ_arr(i,j,k);
+                        cold_diag(i,j,k,cold_diag_offset + 9) = metric *
+                            ((flx_arr[0])(i+1,j,k,0) - (flx_arr[0])(i,j,k,0)) * dxInv[0];
+                        cold_diag(i,j,k,cold_diag_offset + 10) = metric *
+                            ((flx_arr[1])(i,j+1,k,0) - (flx_arr[1])(i,j,k,0)) * dxInv[1];
+                        cold_diag(i,j,k,cold_diag_offset + 11) = metric *
+                            ((flx_arr[2])(i,j,k+1,0) - (flx_arr[2])(i,j,k,0)) * dxInv[2];
+                    } else {
+                        cold_diag(i,j,k,cold_diag_offset + 9) = zero;
+                        cold_diag(i,j,k,cold_diag_offset + 10) = zero;
+                        cold_diag(i,j,k,cold_diag_offset + 11) = zero;
+                    }
+                });
+            }
             AdvectionSrcForScalars(bx, icomp, ncomp,
                                 avg_xmom_arr, avg_ymom_arr, avg_zmom_arr,
                                 cell_prim, cell_rhs,
@@ -619,6 +637,26 @@ void erf_slow_rhs_pre (int level, int finest_level,
                                 l_horiz_adv_type, l_vert_adv_type,
                                 l_horiz_upw_frac, l_vert_upw_frac,
                                 flx_arr, domain, bc_ptr_h);
+            if (cold_dycore_diagnostics) {
+                ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+                {
+                    if (detJ_arr(i,j,k) > zero) {
+                        const Real metric = -mf_mx(i,j,0) * mf_my(i,j,0) / detJ_arr(i,j,k);
+                        cold_diag(i,j,k,cold_diag_offset + 12) = metric *
+                            ((flx_arr[0])(i+1,j,k,0) - (flx_arr[0])(i,j,k,0)) * dxInv[0];
+                        cold_diag(i,j,k,cold_diag_offset + 13) = metric *
+                            ((flx_arr[1])(i,j+1,k,0) - (flx_arr[1])(i,j,k,0)) * dxInv[1];
+                        cold_diag(i,j,k,cold_diag_offset + 14) = metric *
+                            ((flx_arr[2])(i,j,k+1,0) - (flx_arr[2])(i,j,k,0)) * dxInv[2];
+                    } else {
+                        cold_diag(i,j,k,cold_diag_offset + 12) = zero;
+                        cold_diag(i,j,k,cold_diag_offset + 13) = zero;
+                        cold_diag(i,j,k,cold_diag_offset + 14) = zero;
+                    }
+                    cold_diag(i,j,k,cold_diag_offset + 15) = cell_data(i,j,k,Rho_comp);
+                    cold_diag(i,j,k,cold_diag_offset + 16) = cell_data(i,j,k,RhoTheta_comp);
+                });
+            }
         } else {
             EBAdvectionSrcForRho(bx, cell_rhs,
                                 rho_u, rho_v, omega_arr,
@@ -639,6 +677,19 @@ void erf_slow_rhs_pre (int level, int finest_level,
                                 l_horiz_upw_frac, l_vert_upw_frac,
                                 flx_arr, domain, bc_ptr_h,
                                 already_on_centroids);
+            if (cold_dycore_diagnostics) {
+                ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+                {
+                    // This diagnostic wave does not use embedded boundaries.
+                    // Preserve a clear sentinel decomposition if an EB case is
+                    // ever run with the same executable.
+                    for (int n = 9; n <= 14; ++n) {
+                        cold_diag(i,j,k,cold_diag_offset + n) = zero;
+                    }
+                    cold_diag(i,j,k,cold_diag_offset + 15) = cell_data(i,j,k,Rho_comp);
+                    cold_diag(i,j,k,cold_diag_offset + 16) = cell_data(i,j,k,RhoTheta_comp);
+                });
+            }
         }
 
         if (cold_dycore_diagnostics) {

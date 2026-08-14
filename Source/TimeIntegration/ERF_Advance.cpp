@@ -209,9 +209,11 @@ ERF::Advance (int lev, double time, double dt_lev, int iteration, int /*ncycle*/
 
     // Read-only diagnostic storage for the three compressible RK stages.  Each
     // stage records advection, turbulent/molecular diffusion, explicit source,
-    // total slow-RHS, and the residual fast/acoustic contribution for rho and
-    // rho-theta.  The values are only reported if the existing cold guard fires.
-    MultiFab cold_dycore_diagnostics(ba, dm, 27, 0);
+    // total slow-RHS, the residual fast/acoustic contribution for rho and
+    // rho-theta, the directional x/y/z advective contributions, and the stage
+    // rho/rho-theta needed to reconstruct exact directional theta tendencies.
+    // The values are only reported if the existing cold guard fires.
+    MultiFab cold_dycore_diagnostics(ba, dm, 51, 0);
     cold_dycore_diagnostics.setVal(0);
 
     // Source array for conserved cell-centered quantities -- this will be filled

@@ -2920,8 +2920,8 @@ ERF::check_for_low_temp(amrex::MultiFab& S,
         amrex::Gpu::DeviceVector<int> d_index(3, -1);
         // New state (0:10), reference state (11:16), explicit sources (17:18),
         // shortwave/longwave radiation heating rates (19:20), and three RK
-        // stages of dycore decomposition (21:47; nine fields per stage).
-        constexpr int n_dycore_diagnostics = 27;
+        // stages of dycore decomposition (21:71; seventeen fields per stage).
+        constexpr int n_dycore_diagnostics = 51;
         constexpr int n_diagnostic_values = 21 + n_dycore_diagnostics;
         amrex::Gpu::DeviceVector<Real> d_values(n_diagnostic_values, Real(0.0));
 
@@ -3072,7 +3072,15 @@ ERF::check_for_low_temp(amrex::MultiFab& S,
 
                 if (dycore_diagnostics != nullptr) {
                     for (int nrk = 0; nrk < 3; ++nrk) {
-                        const int off = 21 + nrk * 9;
+                        const int off = 21 + nrk * 17;
+                        const Real stage_rho = h_values[off+15];
+                        const Real stage_theta = h_values[off+16] / stage_rho;
+                        const Real theta_adv_x =
+                            (h_values[off+12] - stage_theta * h_values[off+9]) / stage_rho;
+                        const Real theta_adv_y =
+                            (h_values[off+13] - stage_theta * h_values[off+10]) / stage_rho;
+                        const Real theta_adv_z =
+                            (h_values[off+14] - stage_theta * h_values[off+11]) / stage_rho;
                         amrex::Print() << std::setprecision(15)
                             << "Cold-state dycore diagnostic: rk=" << nrk + 1
                             << " cell=(" << h_index[0] << ","
@@ -3094,10 +3102,24 @@ ERF::check_for_low_temp(amrex::MultiFab& S,
                             << " fast_acoustic_residual_rho=" << h_values[off+7]
                             << " kg m^-3 s^-1"
                             << " fast_acoustic_residual_rho_theta=" << h_values[off+8]
-                            << " kg K m^-3 s^-1\n";
+                            << " kg K m^-3 s^-1"
+                            << " advection_rho_x=" << h_values[off+9]
+                            << " advection_rho_y=" << h_values[off+10]
+                            << " advection_rho_z=" << h_values[off+11]
+                            << " kg m^-3 s^-1"
+                            << " advection_rho_theta_x=" << h_values[off+12]
+                            << " advection_rho_theta_y=" << h_values[off+13]
+                            << " advection_rho_theta_z=" << h_values[off+14]
+                            << " kg K m^-3 s^-1"
+                            << " stage_rho=" << stage_rho << " kg m^-3"
+                            << " stage_theta=" << stage_theta << " K"
+                            << " advection_theta_x=" << theta_adv_x
+                            << " advection_theta_y=" << theta_adv_y
+                            << " advection_theta_z=" << theta_adv_z
+                            << " K s^-1\n";
                     }
 
-                    const int final_off = 21 + 2 * 9;
+                    const int final_off = 21 + 2 * 17;
                     const Real reconstructed_rho =
                         h_values[final_off+5] + h_values[final_off+7];
                     const Real reconstructed_rhotheta =
