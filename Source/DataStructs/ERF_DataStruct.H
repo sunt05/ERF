@@ -174,12 +174,27 @@ struct SolverChoice {
 
         pp.query_enum_case_insensitive("moisture_model",moisture_type);
         pp.query("moisture_temperature_abort_threshold", moisture_temperature_abort_threshold);
+        pp.query("moisture_temperature_diagnostic_threshold",
+                 moisture_temperature_diagnostic_threshold);
+        pp.query("moisture_temperature_diagnostic_interval",
+                 moisture_temperature_diagnostic_interval);
         if (moisture_temperature_abort_threshold < amrex::Real(140.0)) {
             amrex::Error("moisture_temperature_abort_threshold must be at least 140 K");
         }
         if (moisture_temperature_abort_threshold < amrex::Real(188.16) &&
             moisture_type != MoistureType::WSM6) {
             amrex::Error("A moisture_temperature_abort_threshold below 188.16 K is only supported with WSM6");
+        }
+        const bool have_temperature_diagnostic_threshold =
+            moisture_temperature_diagnostic_threshold > amrex::Real(0.0);
+        const bool have_temperature_diagnostic_interval =
+            moisture_temperature_diagnostic_interval > amrex::Real(0.0);
+        if (have_temperature_diagnostic_threshold != have_temperature_diagnostic_interval) {
+            amrex::Error("moisture temperature diagnostics require both a positive threshold and interval");
+        }
+        if (have_temperature_diagnostic_threshold &&
+            moisture_temperature_diagnostic_threshold < moisture_temperature_abort_threshold) {
+            amrex::Error("moisture_temperature_diagnostic_threshold must not be below the abort threshold");
         }
         if (moisture_type == MoistureType::Morrison) {
             moisture_indices = MoistureComponentIndices(
@@ -1451,6 +1466,13 @@ struct SolverChoice {
     // fit. WSM6 evaluates its own closed-form saturation relations and may use
     // an explicitly lower, physically audited threshold.
     amrex::Real moisture_temperature_abort_threshold {amrex::Real(188.16)};
+
+    // Optional read-only tracking of the coldest moist-state cell. When both
+    // values are positive, report the minimum at the requested simulated-time
+    // interval whenever it is below the diagnostic threshold. This does not
+    // modify state or alter the existing catastrophic abort threshold.
+    amrex::Real moisture_temperature_diagnostic_threshold {amrex::Real(-1.0)};
+    amrex::Real moisture_temperature_diagnostic_interval {amrex::Real(-1.0)};
 
     bool moisture_tight_coupling {false};
 

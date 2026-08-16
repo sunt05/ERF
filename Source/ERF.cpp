@@ -6,6 +6,7 @@
  * Main class in ERF code, instantiated from main.cpp
 */
 
+#include <cmath>
 #include <memory>
 #include <iomanip>
 
@@ -2913,9 +2914,27 @@ ERF::check_for_low_temp(amrex::MultiFab& S,
     // configured floor does not abort an otherwise finite state.  Temperatures
     // materially below the configured threshold still fail immediately.
     constexpr Real diagnostic_tolerance = Real(0.2);
-    if (minimum_temperature < t_low - diagnostic_tolerance) {
-        // Record one cell attaining the reduced minimum so a guard failure can
-        // be diagnosed without changing or clipping the prognostic state.
+    const bool guard_failed = minimum_temperature < t_low - diagnostic_tolerance;
+    const Real diagnostic_threshold =
+        solverChoice.moisture_temperature_diagnostic_threshold;
+    const Real diagnostic_interval =
+        solverChoice.moisture_temperature_diagnostic_interval;
+    bool diagnostic_due = false;
+    if (stage == "post_dycore" && diagnostic_threshold > Real(0.0) &&
+        diagnostic_interval > Real(0.0) && minimum_temperature < diagnostic_threshold) {
+        const Real time_epsilon = Real(100.0) * std::numeric_limits<Real>::epsilon() *
+                                  amrex::max(amrex::Math::abs(time), diagnostic_interval);
+        const auto previous_bucket = static_cast<long long>(
+            std::floor((time - dt + time_epsilon) / diagnostic_interval));
+        const auto current_bucket = static_cast<long long>(
+            std::floor((time + time_epsilon) / diagnostic_interval));
+        diagnostic_due = current_bucket > previous_bucket;
+    }
+
+    if (guard_failed || diagnostic_due) {
+        // Record one cell attaining the reduced minimum so its trajectory and
+        // any guard failure can be diagnosed without changing or clipping the
+        // prognostic state.
         amrex::Gpu::DeviceScalar<int> d_found(0);
         amrex::Gpu::DeviceVector<int> d_index(3, -1);
         // New state (0:10), reference state (11:16), explicit sources (17:18),
@@ -3015,7 +3034,8 @@ ERF::check_for_low_temp(amrex::MultiFab& S,
                              d_values.begin(), d_values.end(), h_values.begin());
 
             amrex::Print() << std::setprecision(15)
-                << "Cold-state diagnostic: stage=" << stage
+                << (guard_failed ? "Cold-state diagnostic: stage="
+                                 : "Cold-state watch: stage=") << stage
                 << " level=" << lev
                 << " time=" << time << " s"
                 << " dt=" << dt << " s"
@@ -3033,7 +3053,89 @@ ERF::check_for_low_temp(amrex::MultiFab& S,
                 << " qs=" << h_values[9]
                 << " qg=" << h_values[10] << " kg kg^-1\n";
 
-            if (reference_state != nullptr) {
+            const IntVect cold_cell(AMREX_D_DECL(h_index[0], h_index[1], h_index[2]));
+            const Box& domain = geom[lev].Domain();
+            Box valid_box;
+            amrex::Gpu::DeviceVector<Real> d_geometry(6, Real(0.0));
+            bool geometry_found = false;
+            if (z_phys_nd[lev] && lat_m[lev] && lon_m[lev]) {
+              for (MFIter mfi(S); mfi.isValid(); ++mfi) {
+                if (!mfi.validbox().contains(cold_cell)) { continue; }
+
+                valid_box = mfi.validbox();
+                geometry_found = true;
+                Real* geometry_values = d_geometry.dataPtr();
+                const auto z_arr = z_phys_nd[lev]->const_array(mfi);
+                const auto lat_arr = lat_m[lev]->const_array(mfi);
+                const auto lon_arr = lon_m[lev]->const_array(mfi);
+                const int i = h_index[0];
+                const int j = h_index[1];
+                const int k = h_index[2];
+                const int klo = domain.smallEnd(2);
+                const int khi = domain.bigEnd(2) + 1;
+
+                ParallelFor(1, [=] AMREX_GPU_DEVICE (int) noexcept {
+                    const Real z_surface = Real(0.25) *
+                        (z_arr(i,j,klo) + z_arr(i+1,j,klo) +
+                         z_arr(i,j+1,klo) + z_arr(i+1,j+1,klo));
+                    const Real z_bottom = Real(0.25) *
+                        (z_arr(i,j,k) + z_arr(i+1,j,k) +
+                         z_arr(i,j+1,k) + z_arr(i+1,j+1,k));
+                    const Real z_top = Real(0.25) *
+                        (z_arr(i,j,k+1) + z_arr(i+1,j,k+1) +
+                         z_arr(i,j+1,k+1) + z_arr(i+1,j+1,k+1));
+                    const Real model_top = Real(0.25) *
+                        (z_arr(i,j,khi) + z_arr(i+1,j,khi) +
+                         z_arr(i,j+1,khi) + z_arr(i+1,j+1,khi));
+                    geometry_values[0] = lat_arr(i,j,0);
+                    geometry_values[1] = lon_arr(i,j,0);
+                    geometry_values[2] = z_surface;
+                    geometry_values[3] = Real(0.5) * (z_bottom + z_top);
+                    geometry_values[4] = z_top - z_bottom;
+                    geometry_values[5] = model_top;
+                });
+                break;
+              }
+            }
+
+            if (geometry_found) {
+                amrex::Gpu::streamSynchronize();
+                amrex::Vector<Real> h_geometry(6);
+                amrex::Gpu::copy(amrex::Gpu::deviceToHost,
+                                 d_geometry.begin(), d_geometry.end(), h_geometry.begin());
+                const auto dx = geom[lev].CellSizeArray();
+                const auto prob_lo = geom[lev].ProbLoArray();
+                const Real x = prob_lo[0] + (Real(h_index[0]) + Real(0.5)) * dx[0];
+                const Real y = prob_lo[1] + (Real(h_index[1]) + Real(0.5)) * dx[1];
+                const Real z_agl = h_geometry[3] - h_geometry[2];
+                const Real top_distance = h_geometry[5] - h_geometry[3];
+                amrex::Print() << std::setprecision(15)
+                    << "Cold-state geometry: mode=" << (guard_failed ? "guard" : "watch")
+                    << " level=" << lev
+                    << " time=" << time << " s"
+                    << " cell=(" << h_index[0] << ","
+                    << h_index[1] << "," << h_index[2] << ")"
+                    << " lat=" << h_geometry[0]
+                    << " lon=" << h_geometry[1]
+                    << " x=" << x << " m"
+                    << " y=" << y << " m"
+                    << " z=" << h_geometry[3] << " m"
+                    << " z_agl=" << z_agl << " m"
+                    << " dz=" << h_geometry[4] << " m"
+                    << " model_top=" << h_geometry[5] << " m"
+                    << " top_distance=" << top_distance << " m"
+                    << " valid_box=" << valid_box
+                    << " valid_edge_distance_cells=("
+                    << h_index[0] - valid_box.smallEnd(0) << ","
+                    << valid_box.bigEnd(0) - h_index[0] << ","
+                    << h_index[1] - valid_box.smallEnd(1) << ","
+                    << valid_box.bigEnd(1) - h_index[1] << ","
+                    << h_index[2] - valid_box.smallEnd(2) << ","
+                    << valid_box.bigEnd(2) - h_index[2] << ")"
+                    << " domain_box=" << domain << "\n";
+            }
+
+            if (guard_failed && reference_state != nullptr) {
                 const Real inv_dt = (dt > Real(0.0)) ? Real(1.0) / dt : Real(0.0);
                 const Real total_rho_tendency = (h_values[2] - h_values[13]) * inv_dt;
                 const Real total_rhotheta_tendency = (h_values[3] - h_values[14]) * inv_dt;
@@ -3140,9 +3242,11 @@ ERF::check_for_low_temp(amrex::MultiFab& S,
             }
         }
 
-        Abort("Minimum moist-state temperature " + std::to_string(minimum_temperature) +
-              " K is below erf.moisture_temperature_abort_threshold=" +
-              std::to_string(t_low) + " K");
+        if (guard_failed) {
+            Abort("Minimum moist-state temperature " + std::to_string(minimum_temperature) +
+                  " K is below erf.moisture_temperature_abort_threshold=" +
+                  std::to_string(t_low) + " K");
+        }
     }
 }
 
