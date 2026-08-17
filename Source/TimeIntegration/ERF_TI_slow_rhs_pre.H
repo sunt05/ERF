@@ -265,7 +265,7 @@
         }
 
         if (cold_dycore_diagnostics) {
-            const int cold_diag_offset = nrk * 9;
+            const int cold_diag_offset = nrk * ColdDycoreDiagnostic::fields_per_rk;
             MultiFab::Copy(*cold_dycore_diagnostics, S_rhs[IntVars::cons],
                            Rho_comp, cold_diag_offset + 5, 1, 0);
             MultiFab::Copy(*cold_dycore_diagnostics, S_rhs[IntVars::cons],

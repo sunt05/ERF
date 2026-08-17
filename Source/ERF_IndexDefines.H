@@ -32,6 +32,26 @@
 // We can use this when we assume all passive scalars have the same diffusion coefficients
 #define NPRIMVAR_max (NDRY + 1 + NMOIST_max)
 
+// Read-only cold-state dycore diagnostic layout.  Keep the original 17-field
+// per-RK decomposition contiguous, then append two exact Upwind-3 theta-stencil
+// bounds per RK stage.  Shared constants prevent producers and consumers from
+// silently disagreeing about offsets.
+namespace ColdDycoreDiagnostic {
+    constexpr int nrk_stages = 3;
+    constexpr int fields_per_rk = 17;
+    constexpr int decomposition_fields = nrk_stages * fields_per_rk;
+    constexpr int stencil_fields_per_rk = 2;
+    constexpr int stencil_offset = decomposition_fields;
+    constexpr int total_fields = decomposition_fields
+                               + nrk_stages * stencil_fields_per_rk;
+    constexpr amrex::Real unset_value = amrex::Real(9.87654321e29);
+
+    static_assert(decomposition_fields == 51,
+                  "cold dycore decomposition must contain 51 fields");
+    static_assert(total_fields == 57,
+                  "cold dycore diagnostic layout must contain 57 fields");
+}
+
 // Cell-centered state variables
 #define Rho_comp       0
 #define RhoTheta_comp  (Rho_comp+1)

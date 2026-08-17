@@ -407,9 +407,34 @@ void erf_slow_rhs_pre (int level, int finest_level,
         const Array4<const Real> & cell_data  = S_data[IntVars::cons].array(mfi);
         const Array4<const Real> & cell_prim  = S_prim.array(mfi);
         const Array4<Real>       & cell_rhs   = S_rhs[IntVars::cons].array(mfi);
-        const int cold_diag_offset = nrk * 17;
+        const int cold_diag_offset = nrk * ColdDycoreDiagnostic::fields_per_rk;
         const Array4<Real> cold_diag = cold_dycore_diagnostics
             ? cold_dycore_diagnostics->array(mfi) : Array4<Real>{};
+
+        if (cold_dycore_diagnostics) {
+            const int stencil_offset = ColdDycoreDiagnostic::stencil_offset
+                                     + nrk * ColdDycoreDiagnostic::stencil_fields_per_rk;
+            ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+            {
+                // A cell update uses the two faces on each axis.  For Upwind-3,
+                // their union is the cross-shaped set center +/- 1 and +/- 2
+                // along x, y, and z.  S_prim is fill-patched, so this includes
+                // the actual ghost values used at physical and AMR boundaries.
+                Real theta_min = cell_prim(i,j,k,PrimTheta_comp);
+                Real theta_max = theta_min;
+                for (int offset = -2; offset <= 2; ++offset) {
+                    const Real theta_x = cell_prim(i+offset,j,k,PrimTheta_comp);
+                    const Real theta_y = cell_prim(i,j+offset,k,PrimTheta_comp);
+                    const Real theta_z = cell_prim(i,j,k+offset,PrimTheta_comp);
+                    theta_min = amrex::min(theta_min,
+                                amrex::min(theta_x, amrex::min(theta_y, theta_z)));
+                    theta_max = amrex::max(theta_max,
+                                amrex::max(theta_x, amrex::max(theta_y, theta_z)));
+                }
+                cold_diag(i,j,k,stencil_offset    ) = theta_min;
+                cold_diag(i,j,k,stencil_offset + 1) = theta_max;
+            });
+        }
 
         const Array4<const Real> & cell_old   = S_old[IntVars::cons].array(mfi);
 

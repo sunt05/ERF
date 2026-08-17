@@ -211,10 +211,13 @@ ERF::Advance (int lev, double time, double dt_lev, int iteration, int /*ncycle*/
     // stage records advection, turbulent/molecular diffusion, explicit source,
     // total slow-RHS, the residual fast/acoustic contribution for rho and
     // rho-theta, the directional x/y/z advective contributions, and the stage
-    // rho/rho-theta needed to reconstruct exact directional theta tendencies.
-    // The values are only reported if the existing cold guard fires.
-    MultiFab cold_dycore_diagnostics(ba, dm, 51, 0);
-    cold_dycore_diagnostics.setVal(0);
+    // rho/rho-theta needed to reconstruct exact directional theta tendencies,
+    // followed by the exact Upwind-3 theta-stencil minimum and maximum for each
+    // stage.  A non-physical sentinel makes an incomplete producer layout
+    // visible before any scientific interpretation.
+    MultiFab cold_dycore_diagnostics(
+        ba, dm, ColdDycoreDiagnostic::total_fields, 0);
+    cold_dycore_diagnostics.setVal(ColdDycoreDiagnostic::unset_value);
 
     // Source array for conserved cell-centered quantities -- this will be filled
     //     in the call to make_sources in ERF_TI_slow_rhs_pre.H
