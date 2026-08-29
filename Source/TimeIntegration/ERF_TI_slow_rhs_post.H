@@ -145,6 +145,8 @@
 
         if (cold_dycore_diagnostics && slow_dt > 0.0) {
             const int cold_diag_offset = nrk * ColdDycoreDiagnostic::fields_per_rk;
+            const int late_slow_offset = ColdDycoreDiagnostic::late_slow_offset
+                                       + nrk * ColdDycoreDiagnostic::late_slow_fields_per_rk;
             const Real inv_slow_dt = one / static_cast<Real>(slow_dt);
             for (MFIter mfi(S_new[IntVars::cons], TilingIfNotGPU()); mfi.isValid(); ++mfi) {
                 const Box& bx = mfi.tilebox();
@@ -154,6 +156,17 @@
                 const auto cold_diag = cold_dycore_diagnostics->array(mfi);
                 ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
                 {
+                    // The earlier pre-hook snapshot precedes late additions
+                    // such as level-0 real-boundary relaxation as well as the
+                    // post hook.  Preserve their aggregate RHS increment so
+                    // the final finite-step accounting remains exact without
+                    // mislabeling it as a fast/acoustic contribution.
+                    cold_diag(i,j,k,late_slow_offset) =
+                        srhs(i,j,k,Rho_comp)
+                        - cold_diag(i,j,k,cold_diag_offset + 5);
+                    cold_diag(i,j,k,late_slow_offset + 1) =
+                        srhs(i,j,k,RhoTheta_comp)
+                        - cold_diag(i,j,k,cold_diag_offset + 6);
                     cold_diag(i,j,k,cold_diag_offset + 7) =
                         (snew(i,j,k,Rho_comp) - sold(i,j,k,Rho_comp)) * inv_slow_dt
                         - srhs(i,j,k,Rho_comp);

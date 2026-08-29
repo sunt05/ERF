@@ -2970,7 +2970,10 @@ ERF::check_for_low_temp(amrex::MultiFab& S,
         // New state (0:10), reference state (11:16), explicit sources (17:18),
         // shortwave/longwave radiation heating rates (19:20), and three RK
         // stages of dycore decomposition (21:71; seventeen fields per stage),
-        // followed by per-stage exact Upwind-3 theta-stencil bounds (72:77).
+        // followed by per-stage exact Upwind-3 theta-stencil bounds (72:77)
+        // and late-slow rho/rho-theta RHS increments (78:83).  The latter
+        // include level-0 real-boundary relaxation applied after the earlier
+        // total-slow snapshot.
         constexpr int n_dycore_diagnostics = ColdDycoreDiagnostic::total_fields;
         constexpr int n_diagnostic_values = 21 + n_dycore_diagnostics;
         amrex::Gpu::DeviceVector<Real> d_values(n_diagnostic_values, Real(0.0));
@@ -3225,6 +3228,7 @@ ERF::check_for_low_temp(amrex::MultiFab& S,
                 if (dycore_diagnostics != nullptr) {
                     int decomposition_unset_count = 0;
                     int stencil_unset_count = 0;
+                    int late_slow_unset_count = 0;
                     for (int n = 0; n < ColdDycoreDiagnostic::decomposition_fields; ++n) {
                         if (!std::isfinite(h_values[21+n]) ||
                             amrex::Math::abs(h_values[21+n]) >=
@@ -3233,28 +3237,43 @@ ERF::check_for_low_temp(amrex::MultiFab& S,
                         }
                     }
                     for (int n = ColdDycoreDiagnostic::stencil_offset;
-                         n < ColdDycoreDiagnostic::total_fields; ++n) {
+                         n < ColdDycoreDiagnostic::late_slow_offset; ++n) {
                         if (!std::isfinite(h_values[21+n]) ||
                             amrex::Math::abs(h_values[21+n]) >=
                                 Real(0.5) * ColdDycoreDiagnostic::unset_value) {
                             ++stencil_unset_count;
                         }
                     }
+                    for (int n = ColdDycoreDiagnostic::late_slow_offset;
+                         n < ColdDycoreDiagnostic::total_fields; ++n) {
+                        if (!std::isfinite(h_values[21+n]) ||
+                            amrex::Math::abs(h_values[21+n]) >=
+                                Real(0.5) * ColdDycoreDiagnostic::unset_value) {
+                            ++late_slow_unset_count;
+                        }
+                    }
                     amrex::Print() << "Cold-state diagnostic layout: decomposition_fields="
                         << ColdDycoreDiagnostic::decomposition_fields
                         << " stencil_fields="
+                        << ColdDycoreDiagnostic::late_slow_offset
+                           - ColdDycoreDiagnostic::stencil_offset
+                        << " late_slow_fields="
                         << ColdDycoreDiagnostic::total_fields
-                           - ColdDycoreDiagnostic::decomposition_fields
+                           - ColdDycoreDiagnostic::late_slow_offset
                         << " decomposition_unset_count=" << decomposition_unset_count
                         << " stencil_unset_count=" << stencil_unset_count
+                        << " late_slow_unset_count=" << late_slow_unset_count
                         << " layout_valid="
-                        << (decomposition_unset_count == 0 && stencil_unset_count == 0)
+                        << (decomposition_unset_count == 0 && stencil_unset_count == 0
+                            && late_slow_unset_count == 0)
                         << "\n";
 
                     for (int nrk = 0; nrk < ColdDycoreDiagnostic::nrk_stages; ++nrk) {
                         const int off = 21 + nrk * ColdDycoreDiagnostic::fields_per_rk;
                         const int stencil_off = 21 + ColdDycoreDiagnostic::stencil_offset
                                               + nrk * ColdDycoreDiagnostic::stencil_fields_per_rk;
+                        const int late_slow_off = 21 + ColdDycoreDiagnostic::late_slow_offset
+                                                + nrk * ColdDycoreDiagnostic::late_slow_fields_per_rk;
                         const Real stage_rho = h_values[off+15];
                         const Real stage_theta = h_values[off+16] / stage_rho;
                         const Real output_theta =
@@ -3267,8 +3286,13 @@ ERF::check_for_low_temp(amrex::MultiFab& S,
                         const Real theta_diffusion = h_values[off+2] / stage_rho;
                         const Real theta_source =
                             (h_values[off+4] - stage_theta * h_values[off+3]) / stage_rho;
-                        const Real theta_slow_rhs =
+                        const Real theta_pre_slow_rhs =
                             (h_values[off+6] - stage_theta * h_values[off+5]) / stage_rho;
+                        const Real theta_late_slow_increment =
+                            (h_values[late_slow_off+1]
+                             - stage_theta * h_values[late_slow_off]) / stage_rho;
+                        const Real theta_total_slow_rhs =
+                            theta_pre_slow_rhs + theta_late_slow_increment;
                         const Real theta_fast =
                             (h_values[off+8] - stage_theta * h_values[off+7]) / stage_rho;
                         const Real theta_adv_x =
@@ -3299,6 +3323,10 @@ ERF::check_for_low_temp(amrex::MultiFab& S,
                             << " kg m^-3 s^-1"
                             << " total_slow_rhs_rho_theta=" << h_values[off+6]
                             << " kg K m^-3 s^-1"
+                            << " late_slow_increment_rho=" << h_values[late_slow_off]
+                            << " kg m^-3 s^-1"
+                            << " late_slow_increment_rho_theta=" << h_values[late_slow_off+1]
+                            << " kg K m^-3 s^-1"
                             << " fast_acoustic_residual_rho=" << h_values[off+7]
                             << " kg m^-3 s^-1"
                             << " fast_acoustic_residual_rho_theta=" << h_values[off+8]
@@ -3321,7 +3349,10 @@ ERF::check_for_low_temp(amrex::MultiFab& S,
                             << " advection_theta=" << theta_advection << " K s^-1"
                             << " turbulent_diffusion_theta=" << theta_diffusion << " K s^-1"
                             << " explicit_source_theta=" << theta_source << " K s^-1"
-                            << " total_slow_rhs_theta=" << theta_slow_rhs << " K s^-1"
+                            << " pre_slow_rhs_theta=" << theta_pre_slow_rhs << " K s^-1"
+                            << " late_slow_increment_theta=" << theta_late_slow_increment
+                            << " K s^-1"
+                            << " total_slow_rhs_theta=" << theta_total_slow_rhs << " K s^-1"
                             << " fast_acoustic_residual_theta=" << theta_fast << " K s^-1"
                             << " advection_theta_x=" << theta_adv_x
                             << " advection_theta_y=" << theta_adv_y
@@ -3336,10 +3367,16 @@ ERF::check_for_low_temp(amrex::MultiFab& S,
                     const int final_off = 21
                         + (ColdDycoreDiagnostic::nrk_stages - 1)
                         * ColdDycoreDiagnostic::fields_per_rk;
+                    const int final_late_slow_off = 21
+                        + ColdDycoreDiagnostic::late_slow_offset
+                        + (ColdDycoreDiagnostic::nrk_stages - 1)
+                        * ColdDycoreDiagnostic::late_slow_fields_per_rk;
                     const Real reconstructed_rho =
-                        h_values[final_off+5] + h_values[final_off+7];
+                        h_values[final_off+5] + h_values[final_late_slow_off]
+                        + h_values[final_off+7];
                     const Real reconstructed_rhotheta =
-                        h_values[final_off+6] + h_values[final_off+8];
+                        h_values[final_off+6] + h_values[final_late_slow_off+1]
+                        + h_values[final_off+8];
                     amrex::Print() << std::setprecision(15)
                         << "Cold-state dycore closure: cell=(" << h_index[0] << ","
                         << h_index[1] << "," << h_index[2] << ")"
