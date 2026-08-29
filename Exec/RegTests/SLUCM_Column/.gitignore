@@ -1,0 +1,7 @@
+build-erf/
+build-wrf/
+slucm_column_erf
+slucm_column_wrf
+trajectory_*.csv
+upstream/
+URBPARM.TBL
