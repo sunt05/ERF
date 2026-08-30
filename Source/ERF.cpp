@@ -1985,6 +1985,7 @@ ERF::ReadParameters ()
         // Frequency of diagnostic output
         pp.query("sum_interval", sum_interval);
         pp.query("sum_period"  , sum_per);
+        pp.query("e7e_surface_budget_diagnostics", m_e7e_surface_budget_diagnostics);
 
         pp.query("pert_interval", pert_interval);
 
@@ -2488,10 +2489,76 @@ ERF::ReadParameters ()
     ParameterSanityChecks();
 }
 
+void
+ERF::AccumulateE7ESurfaceBudgets (int lev, double stage_dt)
+{
+    if (!m_e7e_surface_budget_diagnostics) return;
+
+    AMREX_ALWAYS_ASSERT(e7e_scalar_budget_accum_lev[lev] != nullptr);
+    AMREX_ALWAYS_ASSERT(e7e_tau13_budget_accum_lev[lev] != nullptr);
+    AMREX_ALWAYS_ASSERT(e7e_tau23_budget_accum_lev[lev] != nullptr);
+    AMREX_ALWAYS_ASSERT(SFS_hfx3_lev[lev] != nullptr);
+    AMREX_ALWAYS_ASSERT(SFS_q1fx3_lev[lev] != nullptr);
+    AMREX_ALWAYS_ASSERT(Tau[lev][TauType::tau13] != nullptr);
+    AMREX_ALWAYS_ASSERT(Tau[lev][TauType::tau23] != nullptr);
+
+    const int klo = geom[lev].Domain().smallEnd(2);
+    const Real dt = static_cast<Real>(stage_dt);
+    const Real sensible_scale = Cp_d * dt;
+    const Real latent_scale = L_v * dt;
+
+    MultiFab& scalar_accum = *e7e_scalar_budget_accum_lev[lev];
+#ifdef _OPENMP
+#pragma omp parallel if (Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(scalar_accum, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        const Box& bx = mfi.tilebox();
+        const auto& accum = scalar_accum.array(mfi);
+        const auto& hfx = SFS_hfx3_lev[lev]->const_array(mfi);
+        const auto& qfx = SFS_q1fx3_lev[lev]->const_array(mfi);
+        ParallelFor(bx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
+            accum(i,j,k,0) += sensible_scale * hfx(i,j,klo,0);
+            accum(i,j,k,1) += latent_scale * qfx(i,j,klo,0);
+        });
+    }
+
+    MultiFab& tau13_accum = *e7e_tau13_budget_accum_lev[lev];
+#ifdef _OPENMP
+#pragma omp parallel if (Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(tau13_accum, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        const Box& bx = mfi.tilebox();
+        const auto& accum = tau13_accum.array(mfi);
+        const auto& tau = Tau[lev][TauType::tau13]->const_array(mfi);
+        ParallelFor(bx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
+            accum(i,j,k,0) += dt * tau(i,j,klo,0);
+        });
+    }
+
+    MultiFab& tau23_accum = *e7e_tau23_budget_accum_lev[lev];
+#ifdef _OPENMP
+#pragma omp parallel if (Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(tau23_accum, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        const Box& bx = mfi.tilebox();
+        const auto& accum = tau23_accum.array(mfi);
+        const auto& tau = Tau[lev][TauType::tau23]->const_array(mfi);
+        ParallelFor(bx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
+            accum(i,j,k,0) += dt * tau(i,j,klo,0);
+        });
+    }
+}
+
 // Read in some parameters from inputs file
 void
 ERF::ParameterSanityChecks ()
 {
+    if (m_e7e_surface_budget_diagnostics && !restart_chkfile.empty()) {
+        Abort("E7E surface-budget diagnostics must start uninterrupted from the ERF "
+              "origin: their cumulative accumulators are intentionally not restored "
+              "from a checkpoint");
+    }
+
     AMREX_ALWAYS_ASSERT(cfl > zero || fixed_dt[0] > zero);
 
     // We don't allow use_real_bcs to be true if init_type is not either InitType::WRFInput or InitType::Metgrid

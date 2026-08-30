@@ -284,6 +284,9 @@ ERF::ERF_shared ()
     SFS_diss_lev.resize(nlevs_max);
     SFS_q1fx1_lev.resize(nlevs_max); SFS_q1fx2_lev.resize(nlevs_max); SFS_q1fx3_lev.resize(nlevs_max);
     SFS_q2fx3_lev.resize(nlevs_max);
+    e7e_scalar_budget_accum_lev.resize(nlevs_max);
+    e7e_tau13_budget_accum_lev.resize(nlevs_max);
+    e7e_tau23_budget_accum_lev.resize(nlevs_max);
     eddyDiffs_lev.resize(nlevs_max);
     SmnSmn_lev.resize(nlevs_max);
     Tau_EB.resize(nlevs_max);

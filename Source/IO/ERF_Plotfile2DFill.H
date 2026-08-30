@@ -25,6 +25,12 @@
 namespace plotfile2d
 {
 
+struct MomentumCollocationIntegrals
+{
+    amrex::Real mass_grid;
+    amrex::Real staggered_dual_volume;
+};
+
 // Fill one destination component with a scalar value. Used for documented
 // missing values and zero fills.
 void fill_component_with_value (amrex::MultiFab& dst,
@@ -75,6 +81,25 @@ void fill_latent_heat_flux_from_klevel_or_missing (amrex::MultiFab& dst,
                                                    const amrex::MultiFab* src,
                                                    int src_k,
                                                    amrex::Real missing_value);
+
+// Fixed mass-point views of cumulative native staggered momentum budgets.
+MomentumCollocationIntegrals
+fill_component_from_xface_average_or_value (amrex::MultiFab& dst,
+                                            int dst_comp,
+                                            const amrex::MultiFab* src,
+                                            const amrex::MultiFab* mass_mapfac,
+                                            const amrex::MultiFab* face_mapfac,
+                                            int src_k,
+                                            amrex::Real missing_value);
+
+MomentumCollocationIntegrals
+fill_component_from_yface_average_or_value (amrex::MultiFab& dst,
+                                            int dst_comp,
+                                            const amrex::MultiFab* src,
+                                            const amrex::MultiFab* mass_mapfac,
+                                            const amrex::MultiFab* face_mapfac,
+                                            int src_k,
+                                            amrex::Real missing_value);
 
 } // namespace plotfile2d
 

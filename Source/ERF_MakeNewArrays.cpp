@@ -665,12 +665,31 @@ ERF::update_diffusive_arrays (int lev, const BoxArray& ba, const DistributionMap
             SFS_q1fx3_lev[lev] = nullptr;
             SFS_q2fx3_lev[lev] = nullptr;
         }
+
+        if (m_e7e_surface_budget_diagnostics) {
+            e7e_scalar_budget_accum_lev[lev] =
+                std::make_unique<MultiFab>(ba2d[lev], dm, 2, 0);
+            e7e_tau13_budget_accum_lev[lev] =
+                std::make_unique<MultiFab>(convert(ba2d[lev], IntVect(1,0,0)), dm, 1, 0);
+            e7e_tau23_budget_accum_lev[lev] =
+                std::make_unique<MultiFab>(convert(ba2d[lev], IntVect(0,1,0)), dm, 1, 0);
+            e7e_scalar_budget_accum_lev[lev]->setVal(zero);
+            e7e_tau13_budget_accum_lev[lev]->setVal(zero);
+            e7e_tau23_budget_accum_lev[lev]->setVal(zero);
+        } else {
+            e7e_scalar_budget_accum_lev[lev] = nullptr;
+            e7e_tau13_budget_accum_lev[lev] = nullptr;
+            e7e_tau23_budget_accum_lev[lev] = nullptr;
+        }
     } else {
         for (int i = 0; i < 9; i++) {
             Tau[lev][i] = nullptr;
         }
         SFS_hfx1_lev[lev] = nullptr; SFS_hfx2_lev[lev] = nullptr; SFS_hfx3_lev[lev] = nullptr;
         SFS_diss_lev[lev] = nullptr;
+        e7e_scalar_budget_accum_lev[lev] = nullptr;
+        e7e_tau13_budget_accum_lev[lev] = nullptr;
+        e7e_tau23_budget_accum_lev[lev] = nullptr;
     }
 
     if (l_use_kturb) {

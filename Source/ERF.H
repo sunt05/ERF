@@ -511,6 +511,10 @@ public:
     void Write3DPlotFile  (int which, PlotFileType plotfile_type, amrex::Vector<std::string> plot_var_names);
     void Write2DPlotFile  (int which, PlotFileType plotfile_type, amrex::Vector<std::string> plot_var_names);
 
+    // Accumulate the lower-boundary fluxes that actually enter the final RK3
+    // update. This is opt-in output-only instrumentation for ADEMPTOR-E7E.
+    void AccumulateE7ESurfaceBudgets (int lev, double stage_dt);
+
     // Write subvolume of data into a different "plotfile"
     void WriteSubvolume (int isub, amrex::Vector<std::string> subvol_var_names);
 
@@ -1037,6 +1041,14 @@ private:
     amrex::Vector<std::unique_ptr<amrex::MultiFab>> SFS_diss_lev;
     amrex::Vector<std::unique_ptr<amrex::MultiFab>> SFS_q1fx1_lev, SFS_q1fx2_lev, SFS_q1fx3_lev;
     amrex::Vector<std::unique_ptr<amrex::MultiFab>> SFS_q2fx3_lev;
+
+    // ADEMPTOR-E7E cumulative applied surface budgets. Heat and moisture use
+    // the mass grid; momentum remains on ERF's native x/y-staggered grids
+    // until the 2D output layer performs the fixed de-staggering operation.
+    bool m_e7e_surface_budget_diagnostics = false;
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> e7e_scalar_budget_accum_lev;
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> e7e_tau13_budget_accum_lev;
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> e7e_tau23_budget_accum_lev;
 
     // Diffusive fluxes for EB
     // Tau_EB[level][component][grid_type]

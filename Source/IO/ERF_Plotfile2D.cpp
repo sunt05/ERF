@@ -198,6 +198,12 @@ ERF::Write2DPlotFile (int which, PlotFileType plotfile_type, Vector<std::string>
         const MultiFab* pblh_source = nullptr;
         const MultiFab* sens_flux_source = SFS_hfx3_lev[lev].get();
         const MultiFab* laten_flux_source = SFS_q1fx3_lev[lev].get();
+        const MultiFab* e7e_scalar_budget_source =
+            e7e_scalar_budget_accum_lev[lev].get();
+        const MultiFab* e7e_tau13_budget_source =
+            e7e_tau13_budget_accum_lev[lev].get();
+        const MultiFab* e7e_tau23_budget_source =
+            e7e_tau23_budget_accum_lev[lev].get();
         const MultiFab* shoc_ustar_source = nullptr;
         const MultiFab* shoc_olen_source = nullptr;
         const MultiFab* shoc_wthv_source = nullptr;
@@ -534,6 +540,54 @@ ERF::Write2DPlotFile (int which, PlotFileType plotfile_type, Vector<std::string>
                 mf[lev], mf_comp, laten_flux_source, klo, -999);
             mf_comp++;
         } // latent_heat_flux
+
+        if (containerHasElement(plot_var_names, "e7e_sensible_heat_energy_accum")) {
+            plotfile2d::fill_component_from_klevel_or_value(
+                mf[lev], mf_comp, e7e_scalar_budget_source, 0, -999, 0);
+            mf_comp++;
+        }
+
+        if (containerHasElement(plot_var_names, "e7e_latent_heat_energy_accum")) {
+            plotfile2d::fill_component_from_klevel_or_value(
+                mf[lev], mf_comp, e7e_scalar_budget_source, 0, -999, 1);
+            mf_comp++;
+        }
+
+        if (containerHasElement(plot_var_names, "e7e_x_momentum_impulse_accum")) {
+            const auto integral = plotfile2d::fill_component_from_xface_average_or_value(
+                mf[lev], mf_comp, e7e_tau13_budget_source,
+                mapfac[lev][MapFacType::m_x].get(),
+                mapfac[lev][MapFacType::u_x].get(), 0, -999);
+            if (e7e_tau13_budget_source) {
+                const Real residual = std::abs(integral.mass_grid - integral.staggered_dual_volume);
+                const Real tolerance = 1.0e-10 *
+                    amrex::max(one, std::abs(integral.staggered_dual_volume));
+                Print() << "E7E x-momentum collocation conservation at level " << lev
+                        << ": residual=" << residual << " tolerance=" << tolerance << "\n";
+                if (residual > tolerance) {
+                    Abort("E7E x-momentum mass-grid collocation is not area-conservative");
+                }
+            }
+            mf_comp++;
+        }
+
+        if (containerHasElement(plot_var_names, "e7e_y_momentum_impulse_accum")) {
+            const auto integral = plotfile2d::fill_component_from_yface_average_or_value(
+                mf[lev], mf_comp, e7e_tau23_budget_source,
+                mapfac[lev][MapFacType::m_y].get(),
+                mapfac[lev][MapFacType::v_y].get(), 0, -999);
+            if (e7e_tau23_budget_source) {
+                const Real residual = std::abs(integral.mass_grid - integral.staggered_dual_volume);
+                const Real tolerance = 1.0e-10 *
+                    amrex::max(one, std::abs(integral.staggered_dual_volume));
+                Print() << "E7E y-momentum collocation conservation at level " << lev
+                        << ": residual=" << residual << " tolerance=" << tolerance << "\n";
+                if (residual > tolerance) {
+                    Abort("E7E y-momentum mass-grid collocation is not area-conservative");
+                }
+            }
+            mf_comp++;
+        }
 
         if (containerHasElement(plot_var_names, "shoc_u_star")) {
             plotfile2d::fill_component_from_klevel_or_value(

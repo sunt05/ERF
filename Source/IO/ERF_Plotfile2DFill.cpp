@@ -161,4 +161,90 @@ fill_latent_heat_flux_from_klevel_or_missing (MultiFab& dst,
     }
 }
 
+MomentumCollocationIntegrals
+fill_component_from_xface_average_or_value (MultiFab& dst,
+                                            int dst_comp,
+                                            const MultiFab* src,
+                                            const MultiFab* mass_mapfac,
+                                            const MultiFab* face_mapfac,
+                                            int src_k,
+                                            Real missing_value)
+{
+    if (!src || !mass_mapfac || !face_mapfac) {
+        fill_component_with_value(dst, dst_comp, missing_value);
+        return {zero, zero};
+    }
+
+    MultiFab audit(dst.boxArray(), dst.DistributionMap(), 2, 0);
+
+#ifdef _OPENMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(dst, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        const Box& bx = mfi.tilebox();
+        const auto& dst_arr = dst.array(mfi);
+        const auto& src_arr = src->const_array(mfi);
+        const auto& mf_m = mass_mapfac->const_array(mfi);
+        const auto& mf_u = face_mapfac->const_array(mfi);
+        const auto& audit_arr = audit.array(mfi);
+        ParallelFor(bx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
+            const Real area_m_inv = mf_m(i,j,0) * mf_m(i,j,0);
+            const Real area_u_l = one / (mf_u(i,j,0) * mf_u(i,j,0));
+            const Real area_u_r = one / (mf_u(i+1,j,0) * mf_u(i+1,j,0));
+            const Real staggered_dual = myhalf *
+                (area_u_l * src_arr(i,j,src_k,0) +
+                 area_u_r * src_arr(i+1,j,src_k,0));
+            const Real mass_value = area_m_inv * staggered_dual;
+            dst_arr(i,j,k,dst_comp) = mass_value;
+            audit_arr(i,j,k,0) = mass_value / area_m_inv;
+            audit_arr(i,j,k,1) = staggered_dual;
+        });
+    }
+
+    return {audit.sum(0, false), audit.sum(1, false)};
+}
+
+MomentumCollocationIntegrals
+fill_component_from_yface_average_or_value (MultiFab& dst,
+                                            int dst_comp,
+                                            const MultiFab* src,
+                                            const MultiFab* mass_mapfac,
+                                            const MultiFab* face_mapfac,
+                                            int src_k,
+                                            Real missing_value)
+{
+    if (!src || !mass_mapfac || !face_mapfac) {
+        fill_component_with_value(dst, dst_comp, missing_value);
+        return {zero, zero};
+    }
+
+    MultiFab audit(dst.boxArray(), dst.DistributionMap(), 2, 0);
+
+#ifdef _OPENMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(dst, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        const Box& bx = mfi.tilebox();
+        const auto& dst_arr = dst.array(mfi);
+        const auto& src_arr = src->const_array(mfi);
+        const auto& mf_m = mass_mapfac->const_array(mfi);
+        const auto& mf_v = face_mapfac->const_array(mfi);
+        const auto& audit_arr = audit.array(mfi);
+        ParallelFor(bx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
+            const Real area_m_inv = mf_m(i,j,0) * mf_m(i,j,0);
+            const Real area_v_l = one / (mf_v(i,j,0) * mf_v(i,j,0));
+            const Real area_v_r = one / (mf_v(i,j+1,0) * mf_v(i,j+1,0));
+            const Real staggered_dual = myhalf *
+                (area_v_l * src_arr(i,j,src_k,0) +
+                 area_v_r * src_arr(i,j+1,src_k,0));
+            const Real mass_value = area_m_inv * staggered_dual;
+            dst_arr(i,j,k,dst_comp) = mass_value;
+            audit_arr(i,j,k,0) = mass_value / area_m_inv;
+            audit_arr(i,j,k,1) = staggered_dual;
+        });
+    }
+
+    return {audit.sum(0, false), audit.sum(1, false)};
+}
+
 } // namespace plotfile2d

@@ -196,6 +196,14 @@
                          native_shoc_driver[level].get(),
                          fr_as_crse, fr_as_fine);
 
+        // For the current compressible RK3, the final stage rebuilds the
+        // final state from the old step with one full timestep times this
+        // stage's RHS. Accumulating only nrk==2 therefore uses exactly the
+        // applied lower-boundary fluxes and RK weight of the prognostic update.
+        if (nrk == 2) {
+            AccumulateE7ESurfaceBudgets(level, slow_dt);
+        }
+
         Real sdt = static_cast<Real>(slow_dt);
 
         if ((solverChoice.vert_implicit_fac[level][nrk] > zero_d) && solverChoice.implicit_before_substep) {
