@@ -311,7 +311,7 @@ ERF::Advance (int lev, double time, double dt_lev, int iteration, int /*ncycle*/
         }
         check_for_low_temp(S_new, "post_dycore", lev, time + dt_lev, dt_lev,
                            &S_old, &cc_source, qheating_rates[lev].get(),
-                           &cold_dycore_diagnostics);
+                           &cold_dycore_diagnostics, &U_new, &V_new, &W_new);
     } else {
         // Otherwise we will test on negative (rhotheta) coming out of the dycore
         if (verbose > 1) {

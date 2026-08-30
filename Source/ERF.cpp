@@ -2887,7 +2887,10 @@ ERF::check_for_low_temp(amrex::MultiFab& S,
                         const amrex::MultiFab* reference_state,
                         const amrex::MultiFab* explicit_source,
                         const amrex::MultiFab* radiation_heating,
-                        const amrex::MultiFab* dycore_diagnostics)
+                        const amrex::MultiFab* dycore_diagnostics,
+                        const amrex::MultiFab* xvel,
+                        const amrex::MultiFab* yvel,
+                        const amrex::MultiFab* zvel)
 {
     // *****************************************************************************
     // Test for low temp (low is defined as beyond the selected microphysics range
@@ -2937,7 +2940,7 @@ ERF::check_for_low_temp(amrex::MultiFab& S,
             });
         reference_minimum_temperature = get<0>(reference_reduced);
         constexpr Real origin_thresholds[] = {
-            Real(200.0), Real(190.0), Real(180.0),
+            Real(220.0), Real(210.0), Real(200.0), Real(190.0), Real(180.0),
             Real(170.0), Real(160.0), Real(150.0)
         };
         for (Real threshold : origin_thresholds) {
@@ -3106,7 +3109,9 @@ ERF::check_for_low_temp(amrex::MultiFab& S,
             const Box& domain = geom[lev].Domain();
             Box valid_box;
             amrex::Gpu::DeviceVector<Real> d_geometry(6, Real(0.0));
+            amrex::Gpu::DeviceVector<Real> d_wave_state(8, Real(0.0));
             bool geometry_found = false;
+            bool wave_state_found = false;
             if (z_phys_nd[lev] && lat_m[lev] && lon_m[lev]) {
               for (MFIter mfi(S); mfi.isValid(); ++mfi) {
                 if (!mfi.validbox().contains(cold_cell)) { continue; }
@@ -3145,6 +3150,63 @@ ERF::check_for_low_temp(amrex::MultiFab& S,
                 });
                 break;
               }
+            }
+
+            if (xvel != nullptr && yvel != nullptr && zvel != nullptr) {
+              for (MFIter mfi(S); mfi.isValid(); ++mfi) {
+                if (!mfi.validbox().contains(cold_cell)) { continue; }
+
+                wave_state_found = true;
+                Real* wave_values = d_wave_state.dataPtr();
+                const auto u_arr = xvel->const_array(mfi);
+                const auto v_arr = yvel->const_array(mfi);
+                const auto w_arr = zvel->const_array(mfi);
+                const auto p0_arr = base_state[lev].const_array(mfi);
+                const int i = h_index[0];
+                const int j = h_index[1];
+                const int k = h_index[2];
+                const Real pressure = h_values[1];
+
+                ParallelFor(1, [=] AMREX_GPU_DEVICE (int) noexcept {
+                    const Real u = Real(0.5) * (u_arr(i,j,k) + u_arr(i+1,j,k));
+                    const Real v = Real(0.5) * (v_arr(i,j,k) + v_arr(i,j+1,k));
+                    const Real w = Real(0.5) * (w_arr(i,j,k) + w_arr(i,j,k+1));
+                    const Real p0 = p0_arr(i,j,k,BaseState::p0_comp);
+                    const Real p_prime = pressure - p0;
+                    wave_values[0] = u;
+                    wave_values[1] = v;
+                    wave_values[2] = w;
+                    wave_values[3] = p0;
+                    wave_values[4] = p_prime;
+                    wave_values[5] = p_prime * w;
+                    wave_values[6] = Real(0.5) * (u*u + v*v + w*w);
+                    wave_values[7] = Real(0.5) * w*w;
+                });
+                break;
+              }
+            }
+
+            if (wave_state_found) {
+                amrex::Gpu::streamSynchronize();
+                amrex::Vector<Real> h_wave_state(8);
+                amrex::Gpu::copy(amrex::Gpu::deviceToHost,
+                                 d_wave_state.begin(), d_wave_state.end(),
+                                 h_wave_state.begin());
+                amrex::Print() << std::setprecision(15)
+                    << "Cold-state wave: mode=" << (guard_failed ? "guard" : "watch")
+                    << " level=" << lev
+                    << " time=" << time << " s"
+                    << " cell=(" << h_index[0] << ","
+                    << h_index[1] << "," << h_index[2] << ")"
+                    << " u=" << h_wave_state[0] << " m s^-1"
+                    << " v=" << h_wave_state[1] << " m s^-1"
+                    << " w=" << h_wave_state[2] << " m s^-1"
+                    << " p0=" << h_wave_state[3] << " Pa"
+                    << " p_prime=" << h_wave_state[4] << " Pa"
+                    << " vertical_wave_energy_flux_proxy=" << h_wave_state[5] << " W m^-2"
+                    << " kinetic_energy_per_mass=" << h_wave_state[6] << " J kg^-1"
+                    << " vertical_kinetic_energy_per_mass=" << h_wave_state[7]
+                    << " J kg^-1\n";
             }
 
             if (geometry_found) {

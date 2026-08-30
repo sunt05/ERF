@@ -302,7 +302,10 @@ public:
                                    const amrex::MultiFab* reference_state = nullptr,
                                    const amrex::MultiFab* explicit_source = nullptr,
                                    const amrex::MultiFab* radiation_heating = nullptr,
-                                   const amrex::MultiFab* dycore_diagnostics = nullptr);
+                                   const amrex::MultiFab* dycore_diagnostics = nullptr,
+                                   const amrex::MultiFab* xvel = nullptr,
+                                   const amrex::MultiFab* yvel = nullptr,
+                                   const amrex::MultiFab* zvel = nullptr);
 
     void compute_max_pressure_gradient_diagnostic(int lev);
 
